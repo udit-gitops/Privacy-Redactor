@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+presidio-analyzer
+presidio-anonymizer
+groq
+pydantic
+python-dotenv
