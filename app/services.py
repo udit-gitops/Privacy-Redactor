@@ -2,6 +2,7 @@ import os
 import json
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -270,19 +271,20 @@ def merge_overlapping_spans(results: list) -> list:
             
     return merged
 
-def process_text_redaction(raw_text: str) -> dict:
+def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> dict:
     """
     Main pipeline:
-    1. Slice document into paragraph-safe chunks.
+    1. Slice document into optimal chunk sizes.
     2. Analyze each chunk locally with Presidio.
     3. Supplement PII-rich chunks with Groq contextual scanning.
     4. Apply confidence thresholding and ORGANIZATION tie-breaker validations.
     5. Merge overlapping/duplicate spans.
-    6. Anonymize.
+    6. Anonymize the document using the requested redaction style.
     """
     if not raw_text.strip():
         return {
             "secured_text": "",
+            "entities": [],
             "metrics": {
                 "characters_processed": 0,
                 "identities_masked": 0
@@ -360,14 +362,44 @@ def process_text_redaction(raw_text: str) -> dict:
     # 6. Merge overlapping spans globally
     merged_results = merge_overlapping_spans(all_final_results)
     
-    # 7. Pass results to anonymizer engine
+    # 7. Construct operators based on redact_style configuration
+    operators = {}
+    entity_types = set(r.entity_type for r in merged_results)
+    for ent_type in entity_types:
+        if redact_style == "REDACTED":
+            operators[ent_type] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
+        elif redact_style == "MASK":
+            # Direct custom function configuration
+            operators[ent_type] = OperatorConfig("custom", {
+                "custom_anonymizer": lambda val: "█" * len(val)
+            })
+        elif redact_style == "HIDDEN":
+            clean_label = ent_type.replace("IN_", "").replace("_", " ").title()
+            operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{clean_label} Hidden>"})
+        else:
+            operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{ent_type}>"})
+
+    # 8. Pass results to anonymizer engine
     anonymized_result = anonymizer.anonymize(
         text=raw_text,
-        analyzer_results=merged_results
+        analyzer_results=merged_results,
+        operators=operators
     )
     
+    # Compile rich entity list
+    entities_list = []
+    for r in merged_results:
+        entities_list.append({
+            "text": raw_text[r.start:r.end],
+            "type": r.entity_type,
+            "score": r.score,
+            "start": r.start,
+            "end": r.end
+        })
+        
     return {
         "secured_text": anonymized_result.text,
+        "entities": entities_list,
         "metrics": {
             "characters_processed": len(raw_text),
             "identities_masked": len(merged_results)

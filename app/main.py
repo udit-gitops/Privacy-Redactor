@@ -6,8 +6,9 @@ import pypdf
 import fitz  # PyMuPDF
 import pdfplumber
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -141,11 +142,72 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to decode text file: {str(e)}")
 
+def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
+    try:
+        # Load PDF using PyMuPDF (fitz)
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page in doc:
+            for ent in entities:
+                ent_text = ent.get("text", "").strip()
+                if not ent_text or len(ent_text) < 2:
+                    continue
+                # Search for occurrences on the page
+                rects = page.search_for(ent_text)
+                for rect in rects:
+                    # Add solid black redaction annotation
+                    page.add_redact_annot(rect, fill=(0,0,0))
+            page.apply_redactions()
+        out_bytes = doc.write()
+        doc.close()
+        return out_bytes
+    except Exception as e:
+        print("Visual PDF redaction failed:", e)
+        return file_bytes
+
+def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        draw = ImageDraw.Draw(image)
+        
+        # Get OCR bounding box data
+        ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+        
+        # Collect entity text terms
+        terms = set()
+        for ent in entities:
+            ent_text = ent.get("text", "").strip()
+            if ent_text:
+                # Add individual words to redact to match Tesseract output
+                for w in ent_text.split():
+                    if len(w) > 1:
+                        terms.add(w.lower())
+                        
+        n_boxes = len(ocr_data['text'])
+        for i in range(n_boxes):
+            word_text = ocr_data['text'][i].strip()
+            if not word_text:
+                continue
+                
+            # If word is in our target terms list, redact it
+            if word_text.lower() in terms:
+                x = ocr_data['left'][i]
+                y = ocr_data['top'][i]
+                w = ocr_data['width'][i]
+                h = ocr_data['height'][i]
+                draw.rectangle([x, y, x + w, y + h], fill="black")
+                
+        out_io = io.BytesIO()
+        image.save(out_io, format="PNG")
+        return out_io.getvalue()
+    except Exception as e:
+        print("Visual Image redaction failed:", e)
+        return file_bytes
+
 @app.post("/api/v1/redact")
-async def redact_text(payload: RedactRequest, db: Session = Depends(get_db)):
+async def redact_text(payload: RedactRequest, redact_style: str = "PLACEHOLDER", db: Session = Depends(get_db)):
     try:
         # Routes the text through Presidio and Groq pipeline
-        result = services.process_text_redaction(payload.text)
+        result = services.process_text_redaction(payload.text, redact_style)
         
         # Save logging telemetry to the database
         db_log = models.RedactionLog(
@@ -161,7 +223,12 @@ async def redact_text(payload: RedactRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/redact-file")
-async def redact_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def redact_file(
+    file: UploadFile = File(...),
+    redact_style: str = "PLACEHOLDER",
+    return_redacted_document: bool = False,
+    db: Session = Depends(get_db)
+):
     try:
         file_bytes = await file.read()
         filename = file.filename.lower()
@@ -181,7 +248,7 @@ async def redact_file(file: UploadFile = File(...), db: Session = Depends(get_db
             raise HTTPException(status_code=400, detail="The uploaded file contains no readable text.")
             
         # Routes the text through Presidio and Groq pipeline
-        result = services.process_text_redaction(text)
+        result = services.process_text_redaction(text, redact_style)
         
         # Save logging telemetry to the database
         db_log = models.RedactionLog(
@@ -192,6 +259,28 @@ async def redact_file(file: UploadFile = File(...), db: Session = Depends(get_db
         db.commit()
         db.refresh(db_log)
         
+        if return_redacted_document:
+            if filename.endswith(".pdf"):
+                redacted_pdf_bytes = redact_pdf_visual(file_bytes, result["entities"])
+                return StreamingResponse(
+                    io.BytesIO(redacted_pdf_bytes),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"}
+                )
+            elif filename.endswith((".png", ".jpg", ".jpeg", ".tiff")):
+                redacted_img_bytes = redact_image_visual(file_bytes, result["entities"])
+                return StreamingResponse(
+                    io.BytesIO(redacted_img_bytes),
+                    media_type="image/png",
+                    headers={"Content-Disposition": f"attachment; filename=redacted_image.png"}
+                )
+            elif filename.endswith(".txt"):
+                return StreamingResponse(
+                    io.BytesIO(result["secured_text"].encode("utf-8")),
+                    media_type="text/plain",
+                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"}
+                )
+            
         return result
     except HTTPException as he:
         raise he
