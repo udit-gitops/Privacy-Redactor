@@ -7,3 +7,5 @@ presidio-anonymizer
 groq
 pydantic
 python-dotenv
+pypdf
+python-multipart
