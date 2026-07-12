@@ -16,7 +16,6 @@ MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.6"))
 
 # Custom Pattern Recognizers for Salary and Money
 # Matches: $45000, 45,000 USD, Rs. 50000, ₹1200000, etc.
-# Note the use of (?:\b|\s|^) to support symbol matching without strict \b word boundaries
 money_pattern = Pattern(
     name="money_pattern",
     regex=r"(?:\b|\s|^)(?:\$|Rs\.?|₹|£|€)\s?\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:,\d{3})*(?:\.\d{2})?\s?(?:USD|INR|dollars|rupees|EUR|GBP)\b",
@@ -203,82 +202,174 @@ def extract_pii_with_groq(text: str) -> list:
         print("Groq extraction error:", e)
         return []
 
+def chunk_text(text: str, chunk_size: int = 2000) -> list:
+    """
+    Splits the document into slices of chunk_size characters,
+    splitting at space characters where possible to avoid cutting words.
+    Returns a list of tuples: (chunk_text, start_index)
+    """
+    chunks = []
+    start = 0
+    total_len = len(text)
+    
+    while start < total_len:
+        end = start + chunk_size
+        if end >= total_len:
+            chunks.append((text[start:total_len], start))
+            break
+            
+        # Try to find a space or newline near the boundary to avoid splitting a word
+        boundary = text.rfind(" ", start, end)
+        if boundary != -1 and boundary > start + (chunk_size // 2):
+            end = boundary
+            
+        chunks.append((text[start:end], start))
+        start = end
+        
+    return chunks
+
+def chunk_needs_groq(chunk: str) -> bool:
+    """
+    Heuristic check to skip calling the Groq LLM on non-PII chunks.
+    If the chunk has no capital letters or numbers, it doesn't contain names/orgs/salaries.
+    """
+    has_upper = any(c.isupper() for c in chunk)
+    has_digit = any(c.isdigit() for c in chunk)
+    return has_upper or has_digit
+
+def merge_overlapping_spans(results: list) -> list:
+    """
+    Sorts and merges overlapping or duplicate RecognizerResult spans.
+    Resolves conflicts by keeping the span with the higher score or longer length.
+    """
+    if not results:
+        return []
+        
+    # Sort results by start index, then by end index descending
+    sorted_results = sorted(results, key=lambda r: (r.start, -r.end))
+    
+    merged = []
+    for current in sorted_results:
+        if not merged:
+            merged.append(current)
+            continue
+            
+        prev = merged[-1]
+        
+        # Overlap check
+        if current.start < prev.end:
+            prev_len = prev.end - prev.start
+            curr_len = current.end - current.start
+            
+            # Keep current if score is higher, or if scores are equal and current is longer
+            if current.score > prev.score or (current.score == prev.score and curr_len > prev_len):
+                merged[-1] = current
+            # Else, keep prev and discard current
+        else:
+            merged.append(current)
+            
+    return merged
+
 def process_text_redaction(raw_text: str) -> dict:
     """
     Main pipeline:
-    1. Scan text using Microsoft Presidio NER (includes custom patterns).
-    2. Supplement with Groq contextual PII scan to catch names and salaries.
-    3. Filter results by MIN_CONFIDENCE_THRESHOLD.
-    4. Check ambiguous organization context.
-    5. Anonymize the results.
+    1. Slice document into paragraph-safe chunks.
+    2. Analyze each chunk locally with Presidio.
+    3. Supplement PII-rich chunks with Groq contextual scanning.
+    4. Apply confidence thresholding and ORGANIZATION tie-breaker validations.
+    5. Merge overlapping/duplicate spans.
+    6. Anonymize.
     """
-    # 1. Presidio Analyzer runs first to spot basic PII entities
-    analysis_results = analyzer.analyze(text=raw_text, language="en")
-    
-    # 2. Groq contextual PII scan for high-fidelity extraction
-    groq_entities = extract_pii_with_groq(raw_text)
-    
-    # 3. Convert Groq entities to RecognizerResult objects and merge
-    additional_results = []
-    for ent in groq_entities:
-        ent_text = ent.get("text", "")
-        ent_type = ent.get("type", "")
-        if not ent_text or not ent_type:
-            continue
-            
-        start_idx = 0
-        while True:
-            start_idx = raw_text.find(ent_text, start_idx)
-            if start_idx == -1:
-                break
-            end_idx = start_idx + len(ent_text)
-            
-            # Check for overlap with existing Presidio results
-            overlap = False
-            for r in analysis_results:
-                if not (end_idx <= r.start or start_idx >= r.end):
-                    overlap = True
-                    break
-            
-            if not overlap:
-                additional_results.append(RecognizerResult(
-                    entity_type=ent_type,
-                    start=start_idx,
-                    end=end_idx,
-                    score=1.0
-                ))
-            start_idx += 1
-            
-    all_results = list(analysis_results) + additional_results
-
-    # 4. Confidence Score Filtering
-    all_results = [r for r in all_results if r.score >= MIN_CONFIDENCE_THRESHOLD]
-
-    # 5. Filter results and handle ambiguity tie-breakers
-    final_results = []
-    for result in all_results:
-        entity_word = raw_text[result.start:result.end]
+    if not raw_text.strip():
+        return {
+            "secured_text": "",
+            "metrics": {
+                "characters_processed": 0,
+                "identities_masked": 0
+            }
+        }
         
-        # Only run Groq tie-breaker check on ORGANIZATION type to avoid API bottlenecks
-        if result.entity_type == "ORGANIZATION" and len(entity_word) > 2:
-            is_extracted_by_groq = any(ent.get("text", "").lower() == entity_word.lower() for ent in groq_entities)
-            if not is_extracted_by_groq:
-                decision = ask_groq_tie_breaker(raw_text, entity_word)
-                if decision == "KEEP":
-                    continue
-                    
-        final_results.append(result)
-
-    # 6. Pass results to anonymizer engine
+    chunks = chunk_text(raw_text, chunk_size=2000)
+    all_final_results = []
+    
+    for chunk, chunk_start in chunks:
+        # 1. Run local Presidio Analyzer
+        chunk_analysis = analyzer.analyze(text=chunk, language="en")
+        
+        # 2. Run Groq scan if chunk contains potential PII
+        groq_entities = []
+        if chunk_needs_groq(chunk):
+            groq_entities = extract_pii_with_groq(chunk)
+            
+        # 3. Merge Groq entities into the chunk analyzer results
+        additional_results = []
+        for ent in groq_entities:
+            ent_text = ent.get("text", "")
+            ent_type = ent.get("type", "")
+            if not ent_text or not ent_type:
+                continue
+                
+            start_idx = 0
+            while True:
+                start_idx = chunk.find(ent_text, start_idx)
+                if start_idx == -1:
+                    break
+                end_idx = start_idx + len(ent_text)
+                
+                # Check for overlap
+                overlap = False
+                for r in chunk_analysis:
+                    if not (end_idx <= r.start or start_idx >= r.end):
+                        overlap = True
+                        break
+                        
+                if not overlap:
+                    additional_results.append(RecognizerResult(
+                        entity_type=ent_type,
+                        start=start_idx,
+                        end=end_idx,
+                        score=1.0
+                    ))
+                start_idx += 1
+                
+        chunk_all_results = list(chunk_analysis) + additional_results
+        
+        # 4. Confidence Score Filtering
+        chunk_all_results = [r for r in chunk_all_results if r.score >= MIN_CONFIDENCE_THRESHOLD]
+        
+        # 5. Handle ambiguity tie-breakers on ORGANIZATION
+        chunk_final = []
+        for result in chunk_all_results:
+            entity_word = chunk[result.start:result.end]
+            
+            if result.entity_type == "ORGANIZATION" and len(entity_word) > 2:
+                is_extracted_by_groq = any(ent.get("text", "").lower() == entity_word.lower() for ent in groq_entities)
+                if not is_extracted_by_groq:
+                    decision = ask_groq_tie_breaker(chunk, entity_word)
+                    if decision == "KEEP":
+                        continue
+                        
+            chunk_final.append(result)
+            
+        # Offset chunk results to match global raw_text coordinate index space
+        for r in chunk_final:
+            r.start += chunk_start
+            r.end += chunk_start
+            all_final_results.append(r)
+            
+    # 6. Merge overlapping spans globally
+    merged_results = merge_overlapping_spans(all_final_results)
+    
+    # 7. Pass results to anonymizer engine
     anonymized_result = anonymizer.anonymize(
         text=raw_text,
-        analyzer_results=final_results
+        analyzer_results=merged_results
     )
     
     return {
         "secured_text": anonymized_result.text,
         "metrics": {
             "characters_processed": len(raw_text),
-            "identities_masked": len(final_results)
+            "identities_masked": len(merged_results)
         }
     }
