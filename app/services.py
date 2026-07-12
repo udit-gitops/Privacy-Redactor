@@ -11,6 +11,9 @@ load_dotenv()
 analyzer = AnalyzerEngine()
 anonymizer = AnonymizerEngine()
 
+# Confidence threshold for PII detections (configurable via env)
+MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.6"))
+
 # Custom Pattern Recognizers for Salary and Money
 # Matches: $45000, 45,000 USD, Rs. 50000, ₹1200000, etc.
 # Note the use of (?:\b|\s|^) to support symbol matching without strict \b word boundaries

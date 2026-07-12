@@ -9,3 +9,7 @@ pydantic
 python-dotenv
 pypdf
 python-multipart
+pymupdf
+pdfplumber
+pytesseract
+pillow
