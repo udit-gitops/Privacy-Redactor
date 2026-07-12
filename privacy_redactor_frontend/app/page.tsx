@@ -2,6 +2,14 @@
 
 import React, { useState, useRef } from 'react';
 
+interface Entity {
+  text: string;
+  type: string;
+  score: number;
+  start: number;
+  end: number;
+}
+
 export default function PrivacyDashboard() {
   const [inputText, setInputText] = useState('');
   const [securedText, setSecuredText] = useState('');
@@ -9,6 +17,9 @@ export default function PrivacyDashboard() {
   const [latency, setLatency] = useState<number | null>(null);
   const [systemStatus, setSystemStatus] = useState<'connected' | 'error' | 'idle'>('idle');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [redactStyle, setRedactStyle] = useState('PLACEHOLDER');
+  const [downloadRedactedDoc, setDownloadRedactedDoc] = useState(false);
+  const [detectedEntities, setDetectedEntities] = useState<Entity[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [metrics, setMetrics] = useState({
@@ -17,25 +28,33 @@ export default function PrivacyDashboard() {
     complianceRating: 'COMPLIANT'
   });
 
-  const handleRedaction = async (fileToProcess?: File) => {
+  const handleRedaction = async (fileToProcess?: File, currentStyle?: string, forceDownload?: boolean) => {
     setIsLoading(true);
     setSystemStatus('idle');
     const startTime = performance.now();
+    const styleParam = currentStyle || redactStyle;
+    const shouldDownload = forceDownload !== undefined ? forceDownload : downloadRedactedDoc;
 
     try {
       let response;
-      if (fileToProcess || selectedFile) {
-        const file = fileToProcess || selectedFile;
+      const file = fileToProcess || selectedFile;
+      
+      if (file) {
         const formData = new FormData();
-        formData.append('file', file!);
+        formData.append('file', file);
+        formData.append('redact_style', styleParam);
+        formData.append('return_redacted_document', shouldDownload ? 'true' : 'false');
 
-        response = await fetch('http://127.0.0.1:8000/api/v1/redact-file', {
+        response = await fetch(`http://127.0.0.1:8000/api/v1/redact-file?redact_style=${styleParam}&return_redacted_document=${shouldDownload ? 'true' : 'false'}`, {
           method: 'POST',
           body: formData,
         });
       } else {
-        if (!inputText.trim()) return;
-        response = await fetch('http://127.0.0.1:8000/api/v1/redact', {
+        if (!inputText.trim()) {
+          setIsLoading(false);
+          return;
+        }
+        response = await fetch(`http://127.0.0.1:8000/api/v1/redact?redact_style=${styleParam}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: inputText }),
@@ -47,10 +66,49 @@ export default function PrivacyDashboard() {
         throw new Error(errData.detail || 'Backend unreachable');
       }
 
+      // Check if the response is a downloadable file stream
+      const contentType = response.headers.get('content-type');
+      if (contentType && (contentType.includes('application/pdf') || contentType.includes('image/') || contentType.includes('text/plain'))) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        
+        // Extract filename from disposition header
+        const disposition = response.headers.get('content-disposition');
+        let filename = file ? `redacted_${file.name}` : 'redacted_payload.txt';
+        if (disposition && disposition.indexOf('attachment') !== -1) {
+          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+          const matches = filenameRegex.exec(disposition);
+          if (matches != null && matches[1]) { 
+            filename = matches[1].replace(/['"]/g, '');
+          }
+        }
+        
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+
+        const endTime = performance.now();
+        setSecuredText(`[Success] Visual Document Redaction Generated & Downloaded.\nFile: ${filename}`);
+        setLatency(Math.round(endTime - startTime));
+        setSystemStatus('connected');
+        setMetrics({
+          charactersProcessed: file ? file.size : inputText.length,
+          identitiesMasked: detectedEntities.length || 1,
+          complianceRating: 'CLEANSED (FILE DOWNLOADED)'
+        });
+        setIsLoading(false);
+        return;
+      }
+
       const data = await response.json();
       const endTime = performance.now();
 
       setSecuredText(data.secured_text);
+      setDetectedEntities(data.entities || []);
       setLatency(Math.round(endTime - startTime));
       setSystemStatus('connected');
       setMetrics({
@@ -72,7 +130,7 @@ export default function PrivacyDashboard() {
       const file = e.target.files[0];
       setSelectedFile(file);
       setInputText(`File selected: ${file.name} (${Math.round(file.size / 1024)} KB)`);
-      handleRedaction(file);
+      handleRedaction(file, redactStyle, downloadRedactedDoc);
     }
   };
 
@@ -84,6 +142,7 @@ export default function PrivacyDashboard() {
     setSelectedFile(null);
     setInputText('');
     setSecuredText('');
+    setDetectedEntities([]);
     setLatency(null);
     setMetrics({ charactersProcessed: 0, identitiesMasked: 0, complianceRating: 'COMPLIANT' });
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -141,7 +200,7 @@ export default function PrivacyDashboard() {
             </div>
             
             <textarea
-              className="w-full flex-1 min-h-[300px] bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:outline-none transition-all resize-none"
+              className="w-full flex-1 min-h-[220px] bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-800 placeholder-slate-400 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:outline-none transition-all resize-none"
               placeholder="Paste raw email, corporate communication, or database logs here..."
               value={inputText}
               onChange={(e) => {
@@ -153,7 +212,7 @@ export default function PrivacyDashboard() {
             {/* Document Upload Zone */}
             <div 
               onClick={triggerFileSelect}
-              className={`border-2 border-dashed rounded-lg p-5 flex flex-col items-center justify-center cursor-pointer transition-all ${
+              className={`border-2 border-dashed rounded-lg p-4 flex flex-col items-center justify-center cursor-pointer transition-all ${
                 selectedFile 
                   ? 'border-indigo-500 bg-indigo-50/30' 
                   : 'border-slate-300 bg-slate-50/50 hover:bg-slate-50 hover:border-slate-400'
@@ -164,15 +223,58 @@ export default function PrivacyDashboard() {
                 ref={fileInputRef} 
                 onChange={handleFileChange} 
                 className="hidden" 
-                accept=".pdf,.docx,.txt"
+                accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.tiff"
               />
-              <svg className="h-8 w-8 text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="h-7 w-7 text-slate-400 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
               </svg>
-              <p className="text-sm font-semibold text-slate-700">
-                {selectedFile ? `Document Attached: ${selectedFile.name}` : 'Upload PDF, Word (DOCX), or Text document'}
+              <p className="text-xs font-semibold text-slate-700">
+                {selectedFile ? `Document Attached: ${selectedFile.name}` : 'Upload PDF, Word (DOCX), Text, or Image'}
               </p>
-              <p className="text-xs text-slate-500 mt-1">Automatic ingestion and layout parsing</p>
+              <p className="text-[10px] text-slate-500">Supports column layout-aware parsing and Tesseract OCR</p>
+            </div>
+
+            {/* Redaction Controls */}
+            <div className="grid grid-cols-2 gap-4 border border-slate-100 p-3 bg-slate-50/30 rounded-lg">
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Redaction Style</label>
+                <select
+                  value={redactStyle}
+                  onChange={(e) => {
+                    setRedactStyle(e.target.value);
+                    if (selectedFile || inputText.trim()) {
+                      handleRedaction(selectedFile || undefined, e.target.value);
+                    }
+                  }}
+                  className="w-full text-xs bg-white border border-slate-200 rounded-md p-2 text-slate-700 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="PLACEHOLDER">Placeholder (&lt;PERSON&gt;)</option>
+                  <option value="REDACTED">Tag Replacement ([REDACTED])</option>
+                  <option value="MASK">Solid Box Mask (████████)</option>
+                  <option value="HIDDEN">Hidden tag (&lt;Name Hidden&gt;)</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col justify-center">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Output Action</label>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="downloadDoc"
+                    checked={downloadRedactedDoc}
+                    onChange={(e) => {
+                      setDownloadRedactedDoc(e.target.checked);
+                      if (selectedFile) {
+                        handleRedaction(selectedFile, redactStyle, e.target.checked);
+                      }
+                    }}
+                    className="h-4.5 w-4.5 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded"
+                  />
+                  <label htmlFor="downloadDoc" className="text-xs text-slate-600 font-medium cursor-pointer select-none">
+                    Download Redacted File
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -207,7 +309,7 @@ export default function PrivacyDashboard() {
               )}
             </div>
             
-            <div className="w-full flex-1 min-h-[420px] bg-slate-50 border border-slate-200 rounded-lg p-5 text-sm font-mono whitespace-pre-wrap overflow-y-auto text-slate-700 leading-relaxed">
+            <div className="w-full flex-1 min-h-[220px] bg-slate-50 border border-slate-200 rounded-lg p-5 text-sm font-mono whitespace-pre-wrap overflow-y-auto text-slate-700 leading-relaxed">
               {securedText ? (
                 <span className={securedText.startsWith('Error:') ? 'text-red-500 font-sans' : ''}>
                   {securedText}
@@ -216,6 +318,25 @@ export default function PrivacyDashboard() {
                 <span className="text-slate-400 font-sans italic">Awaiting document/text stream submission...</span>
               )}
             </div>
+
+            {/* Rich Entity Metadata badges */}
+            {detectedEntities.length > 0 && (
+              <div className="border border-slate-100 p-3 bg-slate-50/20 rounded-lg max-h-[140px] overflow-y-auto">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">Detected Entities</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {detectedEntities.map((ent, idx) => (
+                    <span 
+                      key={idx} 
+                      className="text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-full flex items-center space-x-1"
+                    >
+                      <span className="font-semibold text-indigo-900">{ent.text}</span>
+                      <span className="opacity-60">•</span>
+                      <span className="font-mono text-[9px] bg-indigo-100 text-indigo-800 px-1 rounded">{ent.type}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </main>
@@ -238,7 +359,7 @@ export default function PrivacyDashboard() {
             <div className="bg-slate-50 border border-slate-200/80 p-5 rounded-xl shadow-xs flex flex-col justify-between">
               <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Risk Evaluation</p>
               <span className={`self-start text-xs font-bold mt-2 px-3 py-1.5 rounded-lg border ${
-                metrics.complianceRating === 'COMPLIANT' 
+                metrics.complianceRating.includes('COMPLIANT') 
                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
                   : 'bg-amber-50 text-amber-700 border-amber-200'
               }`}>
