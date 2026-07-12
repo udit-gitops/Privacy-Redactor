@@ -2,6 +2,8 @@ import io
 import zipfile
 import xml.etree.ElementTree as ET
 import pypdf
+import fitz  # PyMuPDF
+import pdfplumber
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -30,16 +32,54 @@ class RedactRequest(BaseModel):
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
-        pdf_file = io.BytesIO(file_bytes)
-        reader = pypdf.PdfReader(pdf_file)
-        text = ""
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        return text
+        # Load PDF using PyMuPDF (fitz)
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        
+        # Load PDF using pdfplumber (for table extraction)
+        pdf_plumber = pdfplumber.open(io.BytesIO(file_bytes))
+        
+        extracted_text = []
+        
+        for page_idx in range(len(doc)):
+            page_fitz = doc[page_idx]
+            page_plumber = pdf_plumber.pages[page_idx]
+            
+            # 1. Extract tables using pdfplumber
+            tables = page_plumber.extract_tables()
+            table_texts = []
+            for table in tables:
+                if not table:
+                    continue
+                # Format table as Markdown-like string
+                md_table = []
+                for row in table:
+                    # Clean None values
+                    row_cleaned = [str(cell).strip() if cell is not None else "" for cell in row]
+                    md_table.append("| " + " | ".join(row_cleaned) + " |")
+                table_texts.append("\n".join(md_table))
+            
+            # 2. Extract column-aware text block layout using PyMuPDF (fitz)
+            # A block has structure: (x0, y0, x1, y1, "text", block_no, block_type)
+            # We sort blocks top-to-bottom, then left-to-right to preserve reading flow
+            blocks = page_fitz.get_text("blocks")
+            page_text = ""
+            for b in sorted(blocks, key=lambda block: (block[1], block[0])):
+                block_text = b[4].strip()
+                if block_text:
+                    page_text += block_text + "\n\n"
+            
+            # 3. Append tables at the end of the page text if any were found
+            if table_texts:
+                page_text += "\n--- Extracted Table(s) ---\n" + "\n\n".join(table_texts) + "\n"
+                
+            extracted_text.append(page_text)
+            
+        doc.close()
+        pdf_plumber.close()
+        return "\n--- Page Break ---\n".join(extracted_text)
+        
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse PDF file: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse layout-aware PDF: {str(e)}")
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
