@@ -36,6 +36,91 @@ salary_recognizer = PatternRecognizer(supported_entity="SALARY", patterns=[salar
 analyzer.registry.add_recognizer(money_recognizer)
 analyzer.registry.add_recognizer(salary_recognizer)
 
+# --- Indian PII Custom Patterns ---
+aadhaar_pattern = Pattern(
+    name="aadhaar_pattern",
+    regex=r"\b[2-9]\d{3}\s\d{4}\s\d{4}\b|\b[2-9]\d{11}\b",
+    score=0.85
+)
+
+pan_pattern = Pattern(
+    name="pan_pattern",
+    regex=r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
+    score=0.9
+)
+
+passport_pattern = Pattern(
+    name="passport_pattern",
+    regex=r"\b[A-Z][0-9]{7}\b",
+    score=0.85
+)
+
+dl_pattern = Pattern(
+    name="dl_pattern",
+    regex=r"\b[A-Z]{2}[0-9]{2}\s?[0-9]{11}\b",
+    score=0.85
+)
+
+vehicle_pattern = Pattern(
+    name="vehicle_pattern",
+    regex=r"\b[A-Z]{2}[0-9]{2}\s?[A-Z]{1,2}\s?[0-9]{4}\b",
+    score=0.85
+)
+
+ifsc_pattern = Pattern(
+    name="ifsc_pattern",
+    regex=r"\b[A-Z]{4}0[A-Z0-9]{6}\b",
+    score=0.9
+)
+
+upi_pattern = Pattern(
+    name="upi_pattern",
+    regex=r"\b[a-zA-Z0-9_.-]+@[a-zA-Z0-9_-]+\b",
+    score=0.85
+)
+
+gstin_pattern = Pattern(
+    name="gstin_pattern",
+    regex=r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b",
+    score=0.9
+)
+
+voter_pattern = Pattern(
+    name="voter_pattern",
+    regex=r"\b[A-Z]{3}[0-9]{7}\b",
+    score=0.85
+)
+
+pincode_pattern = Pattern(
+    name="pincode_pattern",
+    regex=r"\b[1-9][0-9]{5}\b",
+    score=0.75
+)
+
+# Broad numeric pattern for accounts requires contextual trigger words to score high
+bank_acc_pattern = Pattern(
+    name="bank_acc_pattern",
+    regex=r"\b[0-9]{9,18}\b",
+    score=0.5
+)
+
+# Register Indian PII recognizers
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_AADHAAR", patterns=[aadhaar_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PAN", patterns=[pan_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PASSPORT", patterns=[passport_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_DRIVING_LICENSE", patterns=[dl_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_VEHICLE_REG", patterns=[vehicle_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_IFSC", patterns=[ifsc_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_UPI", patterns=[upi_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_GSTIN", patterns=[gstin_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_VOTER_ID", patterns=[voter_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PIN_CODE", patterns=[pincode_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(
+    supported_entity="BANK_ACCOUNT",
+    patterns=[bank_acc_pattern],
+    context=["account", "acc", "bank", "savings", "current", "a/c"]
+))
+
 # Initialize Groq Client
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -121,10 +206,11 @@ def extract_pii_with_groq(text: str) -> list:
 def process_text_redaction(raw_text: str) -> dict:
     """
     Main pipeline:
-    1. Scan text using Microsoft Presidio NER (includes custom salary & money patterns).
+    1. Scan text using Microsoft Presidio NER (includes custom patterns).
     2. Supplement with Groq contextual PII scan to catch names and salaries.
-    3. Check ambiguous organization context.
-    4. Anonymize the results.
+    3. Filter results by MIN_CONFIDENCE_THRESHOLD.
+    4. Check ambiguous organization context.
+    5. Anonymize the results.
     """
     # 1. Presidio Analyzer runs first to spot basic PII entities
     analysis_results = analyzer.analyze(text=raw_text, language="en")
@@ -165,7 +251,10 @@ def process_text_redaction(raw_text: str) -> dict:
             
     all_results = list(analysis_results) + additional_results
 
-    # 4. Filter results and handle ambiguity tie-breakers
+    # 4. Confidence Score Filtering
+    all_results = [r for r in all_results if r.score >= MIN_CONFIDENCE_THRESHOLD]
+
+    # 5. Filter results and handle ambiguity tie-breakers
     final_results = []
     for result in all_results:
         entity_word = raw_text[result.start:result.end]
@@ -180,7 +269,7 @@ def process_text_redaction(raw_text: str) -> dict:
                     
         final_results.append(result)
 
-    # 5. Pass results to anonymizer engine
+    # 6. Pass results to anonymizer engine
     anonymized_result = anonymizer.anonymize(
         text=raw_text,
         analyzer_results=final_results
