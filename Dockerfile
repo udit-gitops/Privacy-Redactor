@@ -16,7 +16,6 @@ RUN python -m spacy download en_core_web_lg
 
 # 6. Copy the rest of the application code into the container
 COPY ./app /code/app
-COPY .env /code/.env
 
 # 7. Expose port 8000 for network communication
 EXPOSE 8000
