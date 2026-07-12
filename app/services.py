@@ -105,16 +105,16 @@ bank_acc_pattern = Pattern(
 )
 
 # Register Indian PII recognizers
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_AADHAAR", patterns=[aadhaar_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PAN", patterns=[pan_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PASSPORT", patterns=[passport_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_DRIVING_LICENSE", patterns=[dl_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_VEHICLE_REG", patterns=[vehicle_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_IFSC", patterns=[ifsc_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_UPI", patterns=[upi_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_GSTIN", patterns=[gstin_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_VOTER_ID", patterns=[voter_pattern]))
-analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IN_PIN_CODE", patterns=[pincode_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="AADHAAR", patterns=[aadhaar_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="PAN", patterns=[pan_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="PASSPORT", patterns=[passport_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="DRIVING_LICENSE", patterns=[dl_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="VEHICLE_REG", patterns=[vehicle_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="IFSC", patterns=[ifsc_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="UPI", patterns=[upi_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="GSTIN", patterns=[gstin_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="VOTER_ID", patterns=[voter_pattern]))
+analyzer.registry.add_recognizer(PatternRecognizer(supported_entity="PIN_CODE", patterns=[pincode_pattern]))
 analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="BANK_ACCOUNT",
     patterns=[bank_acc_pattern],

@@ -220,7 +220,9 @@ async def redact_text(payload: RedactRequest, redact_style: str = "PLACEHOLDER",
         
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Prevent leaking database credentials or system paths in exception dumps
+        print(f"[SECURITY] Exception during redact_text: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error occurred during text sanitization.")
 
 @app.post("/api/v1/redact-file")
 async def redact_file(
@@ -230,7 +232,12 @@ async def redact_file(
     db: Session = Depends(get_db)
 ):
     try:
+        # Prevent Denial of Service (DoS) by limiting file size to 50MB
+        MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
         file_bytes = await file.read()
+        if len(file_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 50 MB.")
+            
         filename = file.filename.lower()
         
         if filename.endswith(".pdf"):
@@ -285,4 +292,5 @@ async def redact_file(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[SECURITY] Exception during redact_file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error occurred during file sanitization.")
