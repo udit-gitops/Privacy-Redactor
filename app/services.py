@@ -288,7 +288,7 @@ def merge_overlapping_spans(results: list) -> list:
 
 
 def mask_with_blocks(value: str) -> str:
-    """Named function for MASK style — Presidio requires callable, not lambda."""
+    """Mask function for MASK style — replaces with black block characters."""
     return "█" * len(value)
 
 
@@ -363,7 +363,7 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
         if redact_style == "REDACTED":
             operators[ent_type] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
         elif redact_style == "MASK":
-            operators[ent_type] = OperatorConfig("custom", {"lambda": mask_with_blocks})
+            operators[ent_type] = OperatorConfig("custom", {"custom_anonymizer": mask_with_blocks})
         elif redact_style == "HIDDEN":
             label = ent_type.replace("IN_", "").replace("_", " ").title()
             operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{label} Hidden>"})
