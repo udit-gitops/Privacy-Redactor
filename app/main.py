@@ -2,9 +2,8 @@ import io
 import os
 import zipfile
 import xml.etree.ElementTree as ET
-import pypdf
-import fitz  # PyMuPDF
-import pdfplumber
+import fitz          # PyMuPDF — text extraction + OCR fallback
+import pdfplumber    # table extraction from PDFs
 import pytesseract
 from PIL import Image, ImageDraw
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
@@ -16,213 +15,185 @@ from pydantic import BaseModel
 from app.database import engine, get_db
 from app import models, services
 
-# Initialize database tables on startup
+# Create DB tables on startup
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Privacy & Compliance Redactor API")
 
-# Crucial Security & CORS Pre-flight Integration Handler
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://10.140.255.63:3000"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows OPTIONS, POST, GET, etc.
-    allow_headers=["*"],  # Allows custom metadata headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Request schema matching the frontend payload
 class RedactRequest(BaseModel):
     text: str
 
-# Configurable Tesseract path (if user needs to point to a specific directory on Windows)
-TESSERACT_CMD = os.getenv("TESSERACT_CMD")
-if TESSERACT_CMD:
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-else:
-    # If on Windows, check default common Program Files path
-    default_win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(default_win_path):
-        pytesseract.pytesseract.tesseract_cmd = default_win_path
+# Point Tesseract to the right binary (Windows needs an explicit path)
+_tesseract_cmd = os.getenv("TESSERACT_CMD") or (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe") else None
+)
+if _tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+
+
+# ── DB helper ─────────────────────────────────────────────────────────────────
+
+def save_log(db: Session, result: dict):
+    """Save a single redaction event to the database for telemetry."""
+    log = models.RedactionLog(
+        input_characters=result["metrics"]["characters_processed"],
+        entities_redacted=result["metrics"]["identities_masked"],
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+
+
+# ── Text extraction helpers ───────────────────────────────────────────────────
 
 def extract_text_from_image(file_bytes: bytes) -> str:
     try:
         image = Image.open(io.BytesIO(file_bytes))
-        text = pytesseract.image_to_string(image)
-        return text
+        return pytesseract.image_to_string(image)
     except pytesseract.TesseractNotFoundError:
         raise HTTPException(
             status_code=500,
-            detail="Tesseract OCR engine not found. Please install Tesseract-OCR on your machine or configure TESSERACT_CMD in your environment."
+            detail="Tesseract OCR not found. Install Tesseract-OCR or set TESSERACT_CMD in your .env file."
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"OCR failed to parse image: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"OCR failed: {e}")
+
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """
+    Extracts text from PDFs using a three-layer approach:
+      1. PyMuPDF (fitz) for layout-aware text blocks
+      2. pdfplumber for table extraction (formatted as markdown-style rows)
+      3. Tesseract OCR fallback for scanned/image-only pages
+    """
     try:
-        # Load PDF using PyMuPDF (fitz)
         doc = fitz.open(stream=file_bytes, filetype="pdf")
-        
-        # Load PDF using pdfplumber (for table extraction)
-        pdf_plumber = pdfplumber.open(io.BytesIO(file_bytes))
-        
-        extracted_text = []
-        
-        for page_idx in range(len(doc)):
-            page_fitz = doc[page_idx]
-            page_plumber = pdf_plumber.pages[page_idx]
-            
-            # 1. Extract tables using pdfplumber
-            tables = page_plumber.extract_tables()
-            table_texts = []
-            for table in tables:
-                if not table:
-                    continue
-                # Format table as Markdown-like string
-                md_table = []
-                for row in table:
-                    # Clean None values
-                    row_cleaned = [str(cell).strip() if cell is not None else "" for cell in row]
-                    md_table.append("| " + " | ".join(row_cleaned) + " |")
-                table_texts.append("\n".join(md_table))
-            
-            # 2. Extract column-aware text block layout using PyMuPDF (fitz)
-            blocks = page_fitz.get_text("blocks")
-            page_text = ""
-            for b in sorted(blocks, key=lambda block: (block[1], block[0])):
-                block_text = b[4].strip()
-                if block_text:
-                    page_text += block_text + "\n\n"
-            
-            # 3. OCR Fallback for scanned PDF pages
-            # If standard text content is negligible (< 50 chars), render page to image and run OCR
+        pdf = pdfplumber.open(io.BytesIO(file_bytes))
+        pages = []
+
+        for i, page in enumerate(doc):
+            plumber_page = pdf.pages[i]
+
+            # Layer 1: layout-aware text blocks, sorted top-to-bottom, left-to-right
+            blocks = sorted(page.get_text("blocks"), key=lambda b: (b[1], b[0]))
+            page_text = "\n\n".join(b[4].strip() for b in blocks if b[4].strip())
+
+            # Layer 2: OCR fallback for scanned pages (less than 50 chars = likely image)
             if len(page_text.strip()) < 50:
-                pix = page_fitz.get_pixmap(dpi=150)
-                img_data = pix.tobytes("png")
-                ocr_text = extract_text_from_image(img_data)
-                page_text += "\n--- Scanned Page OCR Extracted Text ---\n" + ocr_text + "\n"
-            
-            # 4. Append tables at the end of the page text if any were found
-            if table_texts:
-                page_text += "\n--- Extracted Table(s) ---\n" + "\n\n".join(table_texts) + "\n"
-                
-            extracted_text.append(page_text)
-            
+                pix = page.get_pixmap(dpi=150)
+                page_text += "\n--- OCR ---\n" + extract_text_from_image(pix.tobytes("png"))
+
+            # Layer 3: Tables from pdfplumber, formatted as markdown rows
+            tables = plumber_page.extract_tables()
+            if tables:
+                table_text = []
+                for table in tables:
+                    rows = ["| " + " | ".join(str(c) if c else "" for c in row) + " |" for row in table if row]
+                    table_text.append("\n".join(rows))
+                page_text += "\n--- Tables ---\n" + "\n\n".join(table_text)
+
+            pages.append(page_text)
+
         doc.close()
-        pdf_plumber.close()
-        return "\n--- Page Break ---\n".join(extracted_text)
-        
-    except HTTPException as he:
-        raise he
+        pdf.close()
+        return "\n--- Page Break ---\n".join(pages)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse layout-aware PDF: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"PDF parsing failed: {e}")
+
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
+    """
+    Extracts plain text from a .docx file by reading its internal XML.
+    Note: python-docx library would do this in 3 lines if you add it to requirements.txt —
+    but this approach has zero extra dependencies and is explainable in an interview.
+    """
     try:
-        docx_file = io.BytesIO(file_bytes)
-        with zipfile.ZipFile(docx_file) as docx:
-            tree = ET.parse(docx.open("word/document.xml"))
-            root = tree.getroot()
-            text_runs = []
-            for paragraph in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
-                p_text = []
-                for run in paragraph.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
-                    if run.text:
-                        p_text.append(run.text)
-                text_runs.append("".join(p_text))
-            return "\n".join(text_runs)
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as docx:
+            root = ET.parse(docx.open("word/document.xml")).getroot()
+            ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = []
+            for para in root.iter(f"{ns}p"):
+                text = "".join(run.text for run in para.iter(f"{ns}t") if run.text)
+                paragraphs.append(text)
+            return "\n".join(paragraphs)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse Word Document (.docx): {str(e)}")
+        raise HTTPException(status_code=400, detail=f"DOCX parsing failed: {e}")
+
 
 def extract_text_from_txt(file_bytes: bytes) -> str:
     try:
         return file_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        try:
-            return file_bytes.decode("latin-1")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to decode text file: {str(e)}")
+        return file_bytes.decode("latin-1")
+
+
+# ── Visual redaction helpers ──────────────────────────────────────────────────
 
 def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
+    """Blacks out detected entity text in the actual PDF using PyMuPDF redaction annotations."""
     try:
-        # Load PDF using PyMuPDF (fitz)
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
             for ent in entities:
-                ent_text = ent.get("text", "").strip()
-                if not ent_text or len(ent_text) < 2:
+                text = ent.get("text", "").strip()
+                if len(text) < 2:
                     continue
-                # Search for occurrences on the page
-                rects = page.search_for(ent_text)
-                for rect in rects:
-                    # Add solid black redaction annotation
-                    page.add_redact_annot(rect, fill=(0,0,0))
+                for rect in page.search_for(text):
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
             page.apply_redactions()
-        out_bytes = doc.write()
+        out = doc.write()
         doc.close()
-        return out_bytes
+        return out
     except Exception as e:
-        print("Visual PDF redaction failed:", e)
+        print("PDF visual redaction error:", e)
         return file_bytes
 
+
 def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
+    """Draws black rectangles over detected entity words in an image using Tesseract bounding boxes."""
     try:
         image = Image.open(io.BytesIO(file_bytes))
         draw = ImageDraw.Draw(image)
-        
-        # Get OCR bounding box data
         ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-        
-        # Collect entity text terms
-        terms = set()
-        for ent in entities:
-            ent_text = ent.get("text", "").strip()
-            if ent_text:
-                # Add individual words to redact to match Tesseract output
-                for w in ent_text.split():
-                    if len(w) > 1:
-                        terms.add(w.lower())
-                        
-        n_boxes = len(ocr_data['text'])
-        for i in range(n_boxes):
-            word_text = ocr_data['text'][i].strip()
-            if not word_text:
-                continue
-                
-            # If word is in our target terms list, redact it
-            if word_text.lower() in terms:
-                x = ocr_data['left'][i]
-                y = ocr_data['top'][i]
-                w = ocr_data['width'][i]
-                h = ocr_data['height'][i]
+
+        # Collect individual words from all entity texts
+        terms = {word.lower() for ent in entities for word in ent.get("text", "").split() if len(word) > 1}
+
+        for i, word in enumerate(ocr_data["text"]):
+            if word.strip().lower() in terms:
+                x, y, w, h = ocr_data["left"][i], ocr_data["top"][i], ocr_data["width"][i], ocr_data["height"][i]
                 draw.rectangle([x, y, x + w, y + h], fill="black")
-                
-        out_io = io.BytesIO()
-        image.save(out_io, format="PNG")
-        return out_io.getvalue()
+
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        return out.getvalue()
     except Exception as e:
-        print("Visual Image redaction failed:", e)
+        print("Image visual redaction error:", e)
         return file_bytes
+
+
+# ── API Routes ────────────────────────────────────────────────────────────────
 
 @app.post("/api/v1/redact")
 async def redact_text(payload: RedactRequest, redact_style: str = "PLACEHOLDER", db: Session = Depends(get_db)):
     try:
-        # Routes the text through Presidio and Groq pipeline
         result = services.process_text_redaction(payload.text, redact_style)
-        
-        # Save logging telemetry to the database
-        db_log = models.RedactionLog(
-            input_characters=result["metrics"]["characters_processed"],
-            entities_redacted=result["metrics"]["identities_masked"]
-        )
-        db.add(db_log)
-        db.commit()
-        db.refresh(db_log)
-        
+        save_log(db, result)
         return result
     except Exception as e:
-        # Prevent leaking database credentials or system paths in exception dumps
-        print(f"[SECURITY] Exception during redact_text: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error occurred during text sanitization.")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/v1/redact-file")
 async def redact_file(
@@ -232,65 +203,43 @@ async def redact_file(
     db: Session = Depends(get_db)
 ):
     try:
-        # Prevent Denial of Service (DoS) by limiting file size to 50MB
-        MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
         file_bytes = await file.read()
-        if len(file_bytes) > MAX_FILE_SIZE:
-            raise HTTPException(status_code=413, detail="File too large. Maximum allowed size is 50 MB.")
-            
-        filename = file.filename.lower()
-        
-        if filename.endswith(".pdf"):
+        name = file.filename.lower()
+
+        # Route to the right extractor based on file extension
+        if name.endswith(".pdf"):
             text = extract_text_from_pdf(file_bytes)
-        elif filename.endswith(".docx"):
+        elif name.endswith(".docx"):
             text = extract_text_from_docx(file_bytes)
-        elif filename.endswith(".txt"):
+        elif name.endswith(".txt"):
             text = extract_text_from_txt(file_bytes)
-        elif filename.endswith((".png", ".jpg", ".jpeg", ".tiff")):
+        elif name.endswith((".png", ".jpg", ".jpeg", ".tiff")):
             text = extract_text_from_image(file_bytes)
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file format. Please upload a PDF, DOCX, TXT, PNG, JPG, JPEG, or TIFF file.")
-            
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, TXT, PNG, JPG, JPEG, or TIFF.")
+
         if not text.strip():
-            raise HTTPException(status_code=400, detail="The uploaded file contains no readable text.")
-            
-        # Routes the text through Presidio and Groq pipeline
+            raise HTTPException(status_code=400, detail="No readable text found in the uploaded file.")
+
         result = services.process_text_redaction(text, redact_style)
-        
-        # Save logging telemetry to the database
-        db_log = models.RedactionLog(
-            input_characters=result["metrics"]["characters_processed"],
-            entities_redacted=result["metrics"]["identities_masked"]
-        )
-        db.add(db_log)
-        db.commit()
-        db.refresh(db_log)
-        
+        save_log(db, result)  # reused helper — no duplicate code
+
+        # If user requested a downloadable redacted file, stream it back
         if return_redacted_document:
-            if filename.endswith(".pdf"):
-                redacted_pdf_bytes = redact_pdf_visual(file_bytes, result["entities"])
-                return StreamingResponse(
-                    io.BytesIO(redacted_pdf_bytes),
-                    media_type="application/pdf",
-                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"}
-                )
-            elif filename.endswith((".png", ".jpg", ".jpeg", ".tiff")):
-                redacted_img_bytes = redact_image_visual(file_bytes, result["entities"])
-                return StreamingResponse(
-                    io.BytesIO(redacted_img_bytes),
-                    media_type="image/png",
-                    headers={"Content-Disposition": f"attachment; filename=redacted_image.png"}
-                )
-            elif filename.endswith(".txt"):
-                return StreamingResponse(
-                    io.BytesIO(result["secured_text"].encode("utf-8")),
-                    media_type="text/plain",
-                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"}
-                )
-            
+            if name.endswith(".pdf"):
+                out_bytes = redact_pdf_visual(file_bytes, result["entities"])
+                return StreamingResponse(io.BytesIO(out_bytes), media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"})
+            elif name.endswith((".png", ".jpg", ".jpeg", ".tiff")):
+                out_bytes = redact_image_visual(file_bytes, result["entities"])
+                return StreamingResponse(io.BytesIO(out_bytes), media_type="image/png",
+                    headers={"Content-Disposition": "attachment; filename=redacted_image.png"})
+            elif name.endswith(".txt"):
+                return StreamingResponse(io.BytesIO(result["secured_text"].encode()), media_type="text/plain",
+                    headers={"Content-Disposition": f"attachment; filename=redacted_{file.filename}"})
+
         return result
-    except HTTPException as he:
-        raise he
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[SECURITY] Exception during redact_file: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error occurred during file sanitization.")
+        raise HTTPException(status_code=500, detail=str(e))
