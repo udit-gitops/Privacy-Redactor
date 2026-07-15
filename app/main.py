@@ -6,7 +6,7 @@ import fitz          # PyMuPDF — text extraction + OCR fallback
 import pdfplumber    # table extraction from PDFs
 import pytesseract
 from PIL import Image, ImageDraw
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -198,8 +198,8 @@ async def redact_text(payload: RedactRequest, redact_style: str = "PLACEHOLDER",
 @app.post("/api/v1/redact-file")
 async def redact_file(
     file: UploadFile = File(...),
-    redact_style: str = "PLACEHOLDER",
-    return_redacted_document: bool = False,
+    redact_style: str = Form("PLACEHOLDER"),       # Form field — comes from multipart/form-data
+    return_redacted_document: str = Form("false"), # Form field — booleans come as strings in forms
     db: Session = Depends(get_db)
 ):
     try:
@@ -224,8 +224,8 @@ async def redact_file(
         result = services.process_text_redaction(text, redact_style)
         save_log(db, result)  # reused helper — no duplicate code
 
-        # If user requested a downloadable redacted file, stream it back
-        if return_redacted_document:
+        # Form fields come as strings — "true"/"false", so compare explicitly
+        if return_redacted_document.lower() == "true":
             if name.endswith(".pdf"):
                 out_bytes = redact_pdf_visual(file_bytes, result["entities"])
                 return StreamingResponse(io.BytesIO(out_bytes), media_type="application/pdf",

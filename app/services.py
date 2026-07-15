@@ -363,11 +363,12 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
         if redact_style == "REDACTED":
             operators[ent_type] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
         elif redact_style == "MASK":
-            operators[ent_type] = OperatorConfig("custom", {"lambda": mask_with_blocks})
+            # Presidio's custom operator key is "custom_anonymizer", not "lambda"
+            operators[ent_type] = OperatorConfig("custom", {"custom_anonymizer": mask_with_blocks})
         elif redact_style == "HIDDEN":
             label = ent_type.replace("IN_", "").replace("_", " ").title()
             operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{label} Hidden>"})
-        else:
+        else:  # PLACEHOLDER (default)
             operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{ent_type}>"})
 
     anonymized = anonymizer.anonymize(text=raw_text, analyzer_results=merged, operators=operators)
