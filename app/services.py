@@ -358,23 +358,33 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
 
     merged = merge_overlapping_spans(all_results)
 
+    # For MASK style: anonymize with placeholder first, then replace with blocks manually
+    # Reason: Presidio's "custom" operator has version-dependent callable issues
+    use_mask = redact_style == "MASK"
+    effective_style = "PLACEHOLDER" if use_mask else redact_style
+
     operators = {}
     for ent_type in {r.entity_type for r in merged}:
-        if redact_style == "REDACTED":
+        if effective_style == "REDACTED":
             operators[ent_type] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
-        elif redact_style == "MASK":
-            # Presidio's custom operator key is "custom_anonymizer", not "lambda"
-            operators[ent_type] = OperatorConfig("custom", {"custom_anonymizer": mask_with_blocks})
-        elif redact_style == "HIDDEN":
+        elif effective_style == "HIDDEN":
             label = ent_type.replace("IN_", "").replace("_", " ").title()
             operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{label} Hidden>"})
         else:  # PLACEHOLDER (default)
             operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{ent_type}>"})
 
     anonymized = anonymizer.anonymize(text=raw_text, analyzer_results=merged, operators=operators)
+    result_text = anonymized.text
+
+    # MASK: replace every <TAG> placeholder with █ blocks of the original entity length
+    if use_mask:
+        # Sort by start descending so replacements don't shift indices
+        for r in sorted(merged, key=lambda x: x.start, reverse=True):
+            original_len = r.end - r.start
+            result_text = result_text.replace(f"<{r.entity_type}>", "█" * original_len, 1)
 
     return {
-        "secured_text": anonymized.text,
+        "secured_text": result_text,
         "entities": [
             {"text": raw_text[r.start:r.end], "type": r.entity_type, "score": r.score, "start": r.start, "end": r.end}
             for r in merged
