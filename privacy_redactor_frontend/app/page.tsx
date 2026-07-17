@@ -10,7 +10,7 @@ interface Entity {
   end: number;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
 
 export default function PrivacyDashboard() {
   const [inputText, setInputText]       = useState('');
@@ -71,8 +71,8 @@ export default function PrivacyDashboard() {
         const a    = document.createElement('a');
         a.href     = url;
         const disposition = response.headers.get('content-disposition') || '';
-        const match = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
-        a.download  = match ? match[1].replace(/['"]/g, '') : `redacted_${file?.name ?? 'file'}`;
+        const match = /filename[^;=\n]*=((['\"]).*?\2|[^;\n]*)/.exec(disposition);
+        a.download  = match ? match[1].replace(/['\"]/g, '') : `redacted_${file?.name ?? 'file'}`;
         document.body.appendChild(a); a.click(); a.remove();
         window.URL.revokeObjectURL(url);
         setSecuredText(`[Success] Redacted file downloaded: ${a.download}`);
@@ -99,8 +99,7 @@ export default function PrivacyDashboard() {
     } catch (error: any) {
       console.error(error);
       setSystemStatus('error');
-      setSecuredText(`Error: ${error.message || 'Failed to reach the redaction engine.'}`);
-    } finally {
+      setSecuredText(`Error: ${error.message || 'Failed to reach the redaction engine.'}`);\n    } finally {
       setIsLoading(false);
     }
   };

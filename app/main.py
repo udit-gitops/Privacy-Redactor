@@ -20,9 +20,18 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Privacy & Compliance Redactor API")
 
+# Allow requests from frontend domains (local dev + production)
+FRONTEND_URLS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://10.140.255.63:3000",
+    "https://spectacular-commitment-production-123b.up.railway.app",
+    "http://spectacular-commitment-production-123b.up.railway.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://10.140.255.63:3000"],
+    allow_origins=FRONTEND_URLS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
