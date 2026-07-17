@@ -99,7 +99,8 @@ export default function PrivacyDashboard() {
     } catch (error: any) {
       console.error(error);
       setSystemStatus('error');
-      setSecuredText(`Error: ${error.message || 'Failed to reach the redaction engine.'}`);\n    } finally {
+      setSecuredText(`Error: ${error.message || 'Failed to reach the redaction engine.'}`);
+    } finally {
       setIsLoading(false);
     }
   };
@@ -376,3 +377,4 @@ export default function PrivacyDashboard() {
     </div>
   );
 }
+
