@@ -30,7 +30,7 @@ for name in RECOGNIZERS_TO_REMOVE:
     except Exception:
         pass  # Already absent — no problem
 
-# ── Money ─────────────────────────────────────────────────────────────────────
+# ── Money ────────────────────────────────────────────────────────────────────
 # Fix: Indian comma format Rs. 2,75,000 — groups can be 1-3 digits after first group
 analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="MONEY",
@@ -55,7 +55,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     )]
 ))
 
-# ── Indian Phone ──────────────────────────────────────────────────────────────
+# ── Indian Phone ─────────────────────────────────────────────────────────────
 # score=0.95 beats Presidio's DATE_TIME and UK_NHS misclassifications
 # Must be registered BEFORE bank account to ensure phone wins on overlap
 analyzer.registry.add_recognizer(PatternRecognizer(
@@ -67,7 +67,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     )]
 ))
 
-# ── Employee ID ───────────────────────────────────────────────────────────────
+# ── Employee ID ──────────────────────────────────────────────────────────────
 analyzer.registry.add_recognizer(PatternRecognizer(
     supported_entity="EMPLOYEE_ID",
     patterns=[Pattern(
@@ -78,7 +78,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     context=["employee", "emp", "staff", "id"]
 ))
 
-# ── Student ID ────────────────────────────────────────────────────────────────
+# ── Student ID ───────────────────────────────────────────────────────────────
 # Two patterns:
 #   1. Alphanumeric: MBMCS23045 (letters + digits)
 #   2. Pure numeric: 2343546 — needs context words "student id" to avoid false positives
@@ -91,7 +91,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     context=["student", "roll", "enrollment", "id", "student id", "roll no", "roll number"]
 ))
 
-# ── Credit Card ───────────────────────────────────────────────────────────────
+# ── Credit Card ──────────────────────────────────────────────────────────────
 # Spaced 16-digit: 4111 1111 1111 1111
 # score=0.95 — must win over BANK_ACCOUNT for the same number
 analyzer.registry.add_recognizer(PatternRecognizer(
@@ -104,7 +104,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     context=["credit", "card", "visa", "mastercard", "debit"]
 ))
 
-# ── Address (full postal address) ─────────────────────────────────────────────
+# ── Address (full postal address) ────────────────────────────────────────────
 # Matches full Indian address lines: "Flat 18B, Lotus Residency, Sector 14, Kota, Rajasthan"
 # Pattern: starts with a door/flat/plot number or building name, ends with a city/state
 analyzer.registry.add_recognizer(PatternRecognizer(
@@ -114,7 +114,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
         regex=(
             r"\b(?:Flat|House|Plot|Door|H\.?No\.?|Block|Sector|Survey|S\.?No\.?|Room|Floor|Wing)[\s.#-]*"
             r"[\w/,-]+(?:[,\s]+[\w\s/.-]+){2,8}"
-            r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Visakhapatnam|Agra|Nashik|Noida|Gurgaon|Gurugram|Faridabad|Chandigarh|Dehradun|Guwahati|Ranchi|Bhubaneswar|Thiruvananthapuram|Mysuru|Mangaluru))"
+            r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Ghaziabad|Ludhiana|Baroda|Nashik))"
             r"(?:[,\s]+(?:Rajasthan|Maharashtra|Karnataka|Tamil Nadu|Uttar Pradesh|West Bengal|Gujarat|Telangana|Andhra Pradesh|Madhya Pradesh|Bihar|Odisha|Kerala|Punjab|Haryana|Uttarakhand|Jharkhand|Assam|Himachal Pradesh|Goa|Delhi|NCR))?"
         ),
         score=0.82
@@ -122,7 +122,7 @@ analyzer.registry.add_recognizer(PatternRecognizer(
     context=["address", "flat", "house", "plot", "street", "road", "nagar", "colony", "sector", "near", "lane"]
 ))
 
-# ── Indian PII ────────────────────────────────────────────────────────────────
+# ── Indian PII ───────────────────────────────────────────────────────────────
 INDIAN_PII = {
     # Aadhaar: spaced (1234 5678 9012) or unspaced 12-digit
     # score=0.75 with context so random numbers don't get flagged
@@ -152,10 +152,14 @@ for entity, (regex, score, context) in INDIAN_PII.items():
         kwargs["context"] = context
     analyzer.registry.add_recognizer(PatternRecognizer(**kwargs))
 
-# ── Groq client ───────────────────────────────────────────────────────────────
+# ── Groq client ──────────────────────────────────────────────────────────────
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+if not GROQ_API_KEY:
+    print("⚠️  WARNING: GROQ_API_KEY not set. AI contextual filtering disabled.")
+    print("   Set GROQ_API_KEY in your .env file to enable contextual entity disambiguation.")
 
 # Cache: (word, local_context) → "REDACT" | "KEEP"
 groq_cache: dict = {}
@@ -242,7 +246,7 @@ def extract_pii_with_groq(text: str) -> list:
         return []
 
 
-# ── Utility helpers ───────────────────────────────────────────────────────────
+# ── Utility helpers ──────────────────────────────────────────────────────────
 
 def chunk_text(text: str, chunk_size: int = 2000) -> list:
     """Splits text into ~chunk_size char chunks at word boundaries."""
@@ -296,7 +300,7 @@ def mask_with_blocks(value: str) -> str:
 NRP_ALIASES = {"NRP"}
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Main pipeline ────────────────────────────────────────────────────────────
 
 def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> dict:
     """

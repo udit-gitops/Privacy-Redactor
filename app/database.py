@@ -7,16 +7,29 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set")
 
-# Production PostgreSQL configuration
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Database is optional — if not set, telemetry logging is skipped
+engine = None
+SessionLocal = None
+
+if DATABASE_URL:
+    try:
+        engine = create_engine(DATABASE_URL)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    except Exception as e:
+        print(f"⚠️  Database connection failed: {e}. Running in no-telemetry mode.")
+        engine = None
+        SessionLocal = None
+else:
+    print("ℹ️  DATABASE_URL not set. Running without telemetry logging.")
 
 Base = declarative_base()
 
 def get_db():
+    """Database session generator — returns None if database is not configured."""
+    if SessionLocal is None:
+        yield None
+        return
     db = SessionLocal()
     try:
         yield db

@@ -6,7 +6,7 @@ import fitz          # PyMuPDF — text extraction + OCR fallback
 import pdfplumber    # table extraction from PDFs
 import pytesseract
 from PIL import Image, ImageDraw
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -15,8 +15,12 @@ from pydantic import BaseModel
 from app.database import engine, get_db
 from app import models, services
 
-# Create DB tables on startup
-models.Base.metadata.create_all(bind=engine)
+# Create DB tables on startup (only if database is configured)
+if engine:
+    try:
+        models.Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        print(f"⚠️  Could not create database tables: {e}")
 
 app = FastAPI(title="Privacy & Compliance Redactor API")
 
@@ -33,7 +37,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_URLS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Restricted to needed methods only
     allow_headers=["*"],
 )
 
@@ -41,28 +45,50 @@ class RedactRequest(BaseModel):
     text: str
 
 # Point Tesseract to the right binary (Windows needs an explicit path)
-_tesseract_cmd = os.getenv("TESSERACT_CMD") or (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe") else None
-)
+_tesseract_cmd = os.getenv("TESSERACT_CMD")
 if _tesseract_cmd:
     pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+else:
+    print("⚠️  WARNING: Tesseract OCR not found. Image/scanned PDF redaction will fail.")
+    print("   Install Tesseract or set TESSERACT_CMD environment variable.")
 
 
-# ── DB helper ─────────────────────────────────────────────────────────────────
+# ── Health Check Endpoint ────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint — verify backend is running and accessible."""
+    return {
+        "status": "ok",
+        "service": "Privacy & Compliance Redactor API",
+        "database": "configured" if engine else "not configured (telemetry disabled)",
+        "groq_ai": "enabled" if services.groq_client else "disabled"
+    }
+
+
+# ── DB helper ──────���────────────────────────────────────────────────────────
 
 def save_log(db: Session, result: dict):
-    """Save a single redaction event to the database for telemetry."""
-    log = models.RedactionLog(
-        input_characters=result["metrics"]["characters_processed"],
-        entities_redacted=result["metrics"]["identities_masked"],
-    )
-    db.add(log)
-    db.commit()
-    db.refresh(log)
+    """Save a single redaction event to the database for telemetry.
+    Silently skipped if database is not configured.
+    """
+    if db is None:  # Database not configured
+        return
+    try:
+        log = models.RedactionLog(
+            input_characters=result["metrics"]["characters_processed"],
+            entities_redacted=result["metrics"]["identities_masked"],
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+    except Exception as e:
+        print(f"⚠️  Failed to save telemetry log: {e}")
 
 
-# ── Text extraction helpers ───────────────────────────────────────────────────
+# ── Text extraction helpers ──────────────────────────────────────────────────
 
 def extract_text_from_image(file_bytes: bytes) -> str:
     try:
@@ -147,7 +173,7 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         return file_bytes.decode("latin-1")
 
 
-# ── Visual redaction helpers ──────────────────────────────────────────────────
+# ── Visual redaction helpers ─────────────────────────────────────────────────
 
 def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
     """Blacks out detected entity text in the actual PDF using PyMuPDF redaction annotations."""
@@ -192,10 +218,14 @@ def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
         return file_bytes
 
 
-# ── API Routes ────────────────────────────────────────────────────────────────
+# ── API Routes ──────────────────────────────────────────────────────────────
 
 @app.post("/api/v1/redact")
-async def redact_text(payload: RedactRequest, redact_style: str = "PLACEHOLDER", db: Session = Depends(get_db)):
+async def redact_text(
+    payload: RedactRequest,
+    redact_style: str = Query("PLACEHOLDER"),  # ← FIX: Use Query() to capture from query params
+    db: Session = Depends(get_db)
+):
     try:
         result = services.process_text_redaction(payload.text, redact_style)
         save_log(db, result)
