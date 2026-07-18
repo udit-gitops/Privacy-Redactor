@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, DateTime
 from datetime import datetime
 from app.database import Base
+
 
 class RedactionLog(Base):
     __tablename__ = "redaction_logs"

@@ -1,15 +1,25 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 psycopg2-binary
+python-dotenv
+pydantic
+
+# PII detection
 presidio-analyzer
 presidio-anonymizer
+spacy
+
+# AI
 groq
-pydantic
-python-dotenv
-pypdf
-python-multipart
+
+# Document parsing
 pymupdf
 pdfplumber
+pypdf
 pytesseract
-pillow
+Pillow
+python-multipart
+
+# Rate limiting — prevents API abuse
+slowapi

@@ -1,24 +1,33 @@
-# 1. Base Python image optimized for production
+# 1. Base image
 FROM python:3.11-slim
 
-# 2. Set system working directory inside container
+# 2. Install system dependencies including Tesseract with Hindi + English language packs
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-hin \
+    libgl1 \
+    libglib2.0-0 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Set working directory
 WORKDIR /code
 
-# 3. Copy only dependency list first (for layer caching optimization)
+# 4. Copy and install Python dependencies first (layer caching)
 COPY ./requirements.txt /code/requirements.txt
-
-# 4. Install system dependencies and python packages
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /code/requirements.txt
 
-# 5. Download the heavy Microsoft Presidio SpaCy language model explicitly 
+# 5. Download spaCy model
 RUN python -m spacy download en_core_web_lg
 
-# 6. Copy the rest of the application code into the container
+# 6. Copy application code
 COPY ./app /code/app
+COPY .env /code/.env
 
-# 7. Expose port 8000 for network communication
+# 7. Expose port
 EXPOSE 8000
 
-# 8. Command to run the FastAPI app inside container
+# 8. Start server
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

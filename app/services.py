@@ -1,7 +1,12 @@
 import os
 import re
 import json
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerResult
+from presidio_analyzer import (
+    AnalyzerEngine,
+    PatternRecognizer,
+    Pattern,
+    RecognizerResult,
+)
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from groq import Groq
@@ -17,11 +22,19 @@ MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.6"))
 # ── Disable unwanted foreign recognizers (UK/US specific) ────────────────────
 # These cause Indian phone numbers to show as <UK_NHS>, US numbers to override etc.
 RECOGNIZERS_TO_REMOVE = [
-    "UsBankRecognizer", "UsPassportRecognizer", "UsSsnRecognizer",
-    "UsItinRecognizer", "UsLicenseRecognizer", "UsNpiRecognizer",
+    "UsBankRecognizer",
+    "UsPassportRecognizer",
+    "UsSsnRecognizer",
+    "UsItinRecognizer",
+    "UsLicenseRecognizer",
+    "UsNpiRecognizer",
     "NhsRecognizer",  # UK NHS — was tagging Indian phone numbers as <UK_NHS>
-    "AuAbnRecognizer", "AuAcnRecognizer", "AuTfnRecognizer", "AuMedicareRecognizer",
-    "EsNifRecognizer", "InPanRecognizer",  # Presidio's built-in PAN (less accurate than ours)
+    "AuAbnRecognizer",
+    "AuAcnRecognizer",
+    "AuTfnRecognizer",
+    "AuMedicareRecognizer",
+    "EsNifRecognizer",
+    "InPanRecognizer",  # Presidio's built-in PAN (less accurate than ours)
 ]
 for name in RECOGNIZERS_TO_REMOVE:
     try:
@@ -30,132 +43,192 @@ for name in RECOGNIZERS_TO_REMOVE:
     except Exception:
         pass  # Already absent — no problem
 
-# ── Money ─────────────────────────────────────────────────────────────────────
+# ── Money ────────────────────────────────────────────────────────────────────
 # Fix: Indian comma format Rs. 2,75,000 — groups can be 1-3 digits after first group
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="MONEY",
-    patterns=[Pattern(
-        name="money_pattern",
-        regex=(
-            r"(?:\$|Rs\.?\s?|₹|£|€)\s?\d+(?:,\d{1,3})*(?:\.\d{2})?"  # ₹/Rs. prefix
-            r"|\b\d+(?:,\d{1,3})*(?:\.\d{2})?\s?(?:USD|INR|dollars?|rupees?|EUR|GBP)\b"  # suffix
-        ),
-        score=0.88
-    )]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="MONEY",
+        patterns=[
+            Pattern(
+                name="money_pattern",
+                regex=(
+                    r"(?:\$|Rs\.?\s?|₹|£|€)\s?\d+(?:,\d{1,3})*(?:\.\d{2})?"  # ₹/Rs. prefix
+                    r"|\b\d+(?:,\d{1,3})*(?:\.\d{2})?\s?(?:USD|INR|dollars?|rupees?|EUR|GBP)\b"  # suffix
+                ),
+                score=0.88,
+            )
+        ],
+    )
+)
 
 # ── Salary ────────────────────────────────────────────────────────────────────
 # Negative lookahead (?![-/]) prevents matching IDs like EMP-2026-1042
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="SALARY",
-    patterns=[Pattern(
-        name="salary_pattern",
-        regex=r"\b(?:salary|earns?|earning|compensation|package|income|pay|wage|wages)\b(?:\s+\w+){0,3}?\s+(?:\$|Rs\.?|₹)?\s?(\d+(?:,\d{1,3})*(?:\.\d{2})?)\b(?![-/])",
-        score=0.9
-    )]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="SALARY",
+        patterns=[
+            Pattern(
+                name="salary_pattern",
+                regex=r"\b(?:salary|earns?|earning|compensation|package|income|pay|wage|wages)\b(?:\s+\w+){0,3}?\s+(?:\$|Rs\.?|₹)?\s?(\d+(?:,\d{1,3})*(?:\.\d{2})?)\b(?![-/])",
+                score=0.9,
+            )
+        ],
+    )
+)
 
-# ── Indian Phone ──────────────────────────────────────────────────────────────
+# ── Indian Phone ─────────────────────────────────────────────────────────────
 # score=0.95 beats Presidio's DATE_TIME and UK_NHS misclassifications
 # Must be registered BEFORE bank account to ensure phone wins on overlap
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="PHONE_NUMBER",
-    patterns=[Pattern(
-        name="indian_phone_pattern",
-        regex=r"(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}\b|\b[6-9]\d{9}\b",
-        score=0.95
-    )]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="PHONE_NUMBER",
+        patterns=[
+            Pattern(
+                name="indian_phone_pattern",
+                regex=r"(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}\b|\b[6-9]\d{9}\b",
+                score=0.95,
+            )
+        ],
+    )
+)
 
-# ── Employee ID ───────────────────────────────────────────────────────────────
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="EMPLOYEE_ID",
-    patterns=[Pattern(
-        name="employee_id_pattern",
-        regex=r"\bEMP[-/]?\d{2,6}[-/]?\d{0,6}\b",
-        score=0.92
-    )],
-    context=["employee", "emp", "staff", "id"]
-))
+# ── Employee ID ──────────────────────────────────────────────────────────────
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="EMPLOYEE_ID",
+        patterns=[
+            Pattern(
+                name="employee_id_pattern",
+                regex=r"\bEMP[-/]?\d{2,6}[-/]?\d{0,6}\b",
+                score=0.92,
+            )
+        ],
+        context=["employee", "emp", "staff", "id"],
+    )
+)
 
-# ── Student ID ────────────────────────────────────────────────────────────────
+# ── Student ID ───────────────────────────────────────────────────────────────
 # Two patterns:
 #   1. Alphanumeric: MBMCS23045 (letters + digits)
 #   2. Pure numeric: 2343546 — needs context words "student id" to avoid false positives
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="STUDENT_ID",
-    patterns=[
-        Pattern(name="student_id_alpha", regex=r"\b[A-Z]{2,8}\d{4,8}\b", score=0.80),
-        Pattern(name="student_id_numeric", regex=r"\b\d{5,10}\b",          score=0.65),
-    ],
-    context=["student", "roll", "enrollment", "id", "student id", "roll no", "roll number"]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="STUDENT_ID",
+        patterns=[
+            Pattern(
+                name="student_id_alpha", regex=r"\b[A-Z]{2,8}\d{4,8}\b", score=0.80
+            ),
+            Pattern(name="student_id_numeric", regex=r"\b\d{5,10}\b", score=0.65),
+        ],
+        context=[
+            "student",
+            "roll",
+            "enrollment",
+            "id",
+            "student id",
+            "roll no",
+            "roll number",
+        ],
+    )
+)
 
-# ── Credit Card ───────────────────────────────────────────────────────────────
+# ── Credit Card ──────────────────────────────────────────────────────────────
 # Spaced 16-digit: 4111 1111 1111 1111
 # score=0.95 — must win over BANK_ACCOUNT for the same number
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="CREDIT_CARD",
-    patterns=[Pattern(
-        name="credit_card_pattern",
-        regex=r"\b(?:\d{4}[\s-]){3}\d{4}\b",
-        score=0.95
-    )],
-    context=["credit", "card", "visa", "mastercard", "debit"]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="CREDIT_CARD",
+        patterns=[
+            Pattern(
+                name="credit_card_pattern",
+                regex=r"\b(?:\d{4}[\s-]){3}\d{4}\b",
+                score=0.95,
+            )
+        ],
+        context=["credit", "card", "visa", "mastercard", "debit"],
+    )
+)
 
-# ── Address (full postal address) ─────────────────────────────────────────────
+# ── Address (full postal address) ────────────────────────────────────────────
 # Matches full Indian address lines: "Flat 18B, Lotus Residency, Sector 14, Kota, Rajasthan"
 # Pattern: starts with a door/flat/plot number or building name, ends with a city/state
-analyzer.registry.add_recognizer(PatternRecognizer(
-    supported_entity="ADDRESS",
-    patterns=[Pattern(
-        name="indian_address_pattern",
-        regex=(
-            r"\b(?:Flat|House|Plot|Door|H\.?No\.?|Block|Sector|Survey|S\.?No\.?|Room|Floor|Wing)[\s.#-]*"
-            r"[\w/,-]+(?:[,\s]+[\w\s/.-]+){2,8}"
-            r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Visakhapatnam|Agra|Nashik|Noida|Gurgaon|Gurugram|Faridabad|Chandigarh|Dehradun|Guwahati|Ranchi|Bhubaneswar|Thiruvananthapuram|Mysuru|Mangaluru))"
-            r"(?:[,\s]+(?:Rajasthan|Maharashtra|Karnataka|Tamil Nadu|Uttar Pradesh|West Bengal|Gujarat|Telangana|Andhra Pradesh|Madhya Pradesh|Bihar|Odisha|Kerala|Punjab|Haryana|Uttarakhand|Jharkhand|Assam|Himachal Pradesh|Goa|Delhi|NCR))?"
-        ),
-        score=0.82
-    )],
-    context=["address", "flat", "house", "plot", "street", "road", "nagar", "colony", "sector", "near", "lane"]
-))
+analyzer.registry.add_recognizer(
+    PatternRecognizer(
+        supported_entity="ADDRESS",
+        patterns=[
+            Pattern(
+                name="indian_address_pattern",
+                regex=(
+                    r"\b(?:Flat|House|Plot|Door|H\.?No\.?|Block|Sector|Survey|S\.?No\.?|Room|Floor|Wing)[\s.#-]*"
+                    r"[\w/,-]+(?:[,\s]+[\w\s/.-]+){2,8}"
+                    r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Ghaziabad|Ludhiana|Baroda|Nashik))"
+                    r"(?:[,\s]+(?:Rajasthan|Maharashtra|Karnataka|Tamil Nadu|Uttar Pradesh|West Bengal|Gujarat|Telangana|Andhra Pradesh|Madhya Pradesh|Bihar|Odisha|Kerala|Punjab|Haryana|Uttarakhand|Jharkhand|Assam|Himachal Pradesh|Goa|Delhi|NCR))?"
+                ),
+                score=0.82,
+            )
+        ],
+        context=[
+            "address",
+            "flat",
+            "house",
+            "plot",
+            "street",
+            "road",
+            "nagar",
+            "colony",
+            "sector",
+            "near",
+            "lane",
+        ],
+    )
+)
 
-# ── Indian PII ────────────────────────────────────────────────────────────────
+# ── Indian PII ───────────────────────────────────────────────────────────────
 INDIAN_PII = {
     # Aadhaar: spaced (1234 5678 9012) or unspaced 12-digit
     # score=0.75 with context so random numbers don't get flagged
-    "AADHAAR":        (r"\b\d{4}\s\d{4}\s\d{4}\b|\b\d{12}\b",                    0.75,
-                       ["aadhaar", "aadhar", "uid", "uidai", "aadhar number", "aadhaar number"]),
-    "PAN":            (r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",                              0.90, None),
-    "PASSPORT":       (r"\b[A-Z][0-9]{7}\b",                                       0.85, None),
-    "DRIVING_LICENSE":(r"\b[A-Z]{2}[0-9]{2}\s?[0-9]{11}\b",                      0.85, None),
-    "VEHICLE_REG":    (r"\b[A-Z]{2}[0-9]{2}\s?[A-Z]{1,2}\s?[0-9]{4}\b",         0.85, None),
-    "IFSC":           (r"\b[A-Z]{4}0[A-Z0-9]{6}\b",                               0.90, None),
-    "UPI":            (r"\b[a-zA-Z0-9_.-]+@[a-zA-Z0-9_-]+\b",                    0.85, None),
-    "GSTIN":          (r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b",  0.90, None),
-    "VOTER_ID":       (r"\b[A-Z]{3}[0-9]{7}\b",                                    0.85, None),
-    "PIN_CODE":       (r"\b[1-9][0-9]{5}\b",                                        0.75, None),
+    "AADHAAR": (
+        r"\b\d{4}\s\d{4}\s\d{4}\b|\b\d{12}\b",
+        0.75,
+        ["aadhaar", "aadhar", "uid", "uidai", "aadhar number", "aadhaar number"],
+    ),
+    "PAN": (r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", 0.90, None),
+    "PASSPORT": (r"\b[A-Z][0-9]{7}\b", 0.85, None),
+    "DRIVING_LICENSE": (r"\b[A-Z]{2}[0-9]{2}\s?[0-9]{11}\b", 0.85, None),
+    "VEHICLE_REG": (r"\b[A-Z]{2}[0-9]{2}\s?[A-Z]{1,2}\s?[0-9]{4}\b", 0.85, None),
+    "IFSC": (r"\b[A-Z]{4}0[A-Z0-9]{6}\b", 0.90, None),
+    "UPI": (r"\b[a-zA-Z0-9_.-]+@[a-zA-Z0-9_-]+\b", 0.85, None),
+    "GSTIN": (r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b", 0.90, None),
+    "VOTER_ID": (r"\b[A-Z]{3}[0-9]{7}\b", 0.85, None),
+    "PIN_CODE": (r"\b[1-9][0-9]{5}\b", 0.75, None),
     # BANK_ACCOUNT score=0.96 so it wins over PHONE_NUMBER for 9-18 digit numbers
     # but context words are still required to avoid false positives on random numbers
-    "BANK_ACCOUNT":   (r"\b[0-9]{9,18}\b",                                         0.96,
-                       ["account", "acc", "bank", "savings", "current", "a/c"]),
+    "BANK_ACCOUNT": (
+        r"\b[0-9]{9,18}\b",
+        0.96,
+        ["account", "acc", "bank", "savings", "current", "a/c"],
+    ),
 }
 
 for entity, (regex, score, context) in INDIAN_PII.items():
     kwargs = dict(
         supported_entity=entity,
-        patterns=[Pattern(name=f"{entity.lower()}_pattern", regex=regex, score=score)]
+        patterns=[Pattern(name=f"{entity.lower()}_pattern", regex=regex, score=score)],
     )
     if context:
         kwargs["context"] = context
     analyzer.registry.add_recognizer(PatternRecognizer(**kwargs))
 
-# ── Groq client ───────────────────────────────────────────────────────────────
+# ── Groq client ──────────────────────────────────────────────────────────────
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+if not GROQ_API_KEY:
+    print("⚠️  WARNING: GROQ_API_KEY not set. AI contextual filtering disabled.")
+    print(
+        "   Set GROQ_API_KEY in your .env file to enable contextual entity disambiguation."
+    )
 
 # Cache: (word, local_context) → "REDACT" | "KEEP"
 groq_cache: dict = {}
@@ -168,8 +241,8 @@ def ask_groq_tie_breaker(chunk: str, word: str, start_idx: int) -> str:
     judged independently — "developer in apple" vs "eating an apple".
     Returns 'REDACT' (real org) or 'KEEP' (common noun).
     """
-    ctx_start     = max(0, start_idx - 60)
-    ctx_end       = min(len(chunk), start_idx + len(word) + 60)
+    ctx_start = max(0, start_idx - 60)
+    ctx_end = min(len(chunk), start_idx + len(word) + 60)
     local_context = chunk[ctx_start:ctx_end]
 
     cache_key = (word.lower().strip(), local_context.lower().strip())
@@ -194,13 +267,16 @@ def ask_groq_tie_breaker(chunk: str, word: str, start_idx: int) -> str:
                         "'is eating an apple and' + 'apple' → KEEP\n"
                         "'works at Google' + 'Google' → REDACT\n\n"
                         "Respond with exactly one word: REDACT or KEEP."
-                    )
+                    ),
                 },
-                {"role": "user", "content": f"Context: '{local_context}'\nWord: '{word}'"}
+                {
+                    "role": "user",
+                    "content": f"Context: '{local_context}'\nWord: '{word}'",
+                },
             ],
-            temperature=0.0
+            temperature=0.0,
         )
-        raw      = response.choices[0].message.content.strip().upper()
+        raw = response.choices[0].message.content.strip().upper()
         decision = "REDACT" if "REDACT" in raw else "KEEP"
         groq_cache[cache_key] = decision
         return decision
@@ -227,22 +303,28 @@ def extract_pii_with_groq(text: str) -> list:
                         "- Actual companies or organizations → type: ORGANIZATION\n"
                         "- Salary or monetary compensation values → type: SALARY\n\n"
                         "Do NOT tag fruits, common nouns, or everyday objects as ORGANIZATION.\n"
-                        "Return ONLY raw JSON: [{\"text\": \"...\", \"type\": \"...\"}]\n"
+                        'Return ONLY raw JSON: [{"text": "...", "type": "..."}]\n'
                         "No markdown, no explanation."
-                    )
+                    ),
                 },
-                {"role": "user", "content": f"Text: \"{text}\""}
+                {"role": "user", "content": f'Text: "{text}"'},
             ],
-            temperature=0.0
+            temperature=0.0,
         )
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.choices[0].message.content.strip(), flags=re.DOTALL)
+        raw = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            response.choices[0].message.content.strip(),
+            flags=re.DOTALL,
+        )
         return json.loads(raw)
     except Exception as e:
         print("Groq extraction error:", e)
         return []
 
 
-# ── Utility helpers ───────────────────────────────────────────────────────────
+# ── Utility helpers ──────────────────────────────────────────────────────────
+
 
 def chunk_text(text: str, chunk_size: int = 2000) -> list:
     """Splits text into ~chunk_size char chunks at word boundaries."""
@@ -280,7 +362,9 @@ def merge_overlapping_spans(results: list) -> list:
         if current.start < prev.end:
             curr_len = current.end - current.start
             prev_len = prev.end - prev.start
-            if current.score > prev.score or (current.score == prev.score and curr_len > prev_len):
+            if current.score > prev.score or (
+                current.score == prev.score and curr_len > prev_len
+            ):
                 merged[-1] = current
         else:
             merged.append(current)
@@ -296,7 +380,8 @@ def mask_with_blocks(value: str) -> str:
 NRP_ALIASES = {"NRP"}
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Main pipeline ────────────────────────────────────────────────────────────
+
 
 def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> dict:
     """
@@ -312,9 +397,13 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
     9. Return result.
     """
     if not raw_text.strip():
-        return {"secured_text": "", "entities": [], "metrics": {"characters_processed": 0, "identities_masked": 0}}
+        return {
+            "secured_text": "",
+            "entities": [],
+            "metrics": {"characters_processed": 0, "identities_masked": 0},
+        }
 
-    chunks      = chunk_text(raw_text)
+    chunks = chunk_text(raw_text)
     all_results = []
 
     for chunk, chunk_start in chunks:
@@ -332,8 +421,14 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
                 if idx == -1:
                     break
                 end_idx = idx + len(ent_text)
-                if not any(not (end_idx <= r.start or idx >= r.end) for r in presidio_results):
-                    presidio_results.append(RecognizerResult(entity_type=ent_type, start=idx, end=end_idx, score=1.0))
+                if not any(
+                    not (end_idx <= r.start or idx >= r.end) for r in presidio_results
+                ):
+                    presidio_results.append(
+                        RecognizerResult(
+                            entity_type=ent_type, start=idx, end=end_idx, score=1.0
+                        )
+                    )
                 idx += 1
 
         # NRP → PERSON cleanup
@@ -341,11 +436,13 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
             if r.entity_type in NRP_ALIASES:
                 r.entity_type = "PERSON"
 
-        presidio_results = [r for r in presidio_results if r.score >= MIN_CONFIDENCE_THRESHOLD]
+        presidio_results = [
+            r for r in presidio_results if r.score >= MIN_CONFIDENCE_THRESHOLD
+        ]
 
         final = []
         for result in presidio_results:
-            word = chunk[result.start:result.end]
+            word = chunk[result.start : result.end]
             if result.entity_type == "ORGANIZATION" and len(word) > 2:
                 if ask_groq_tie_breaker(chunk, word, result.start) == "KEEP":
                     continue
@@ -353,7 +450,7 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
 
         for r in final:
             r.start += chunk_start
-            r.end   += chunk_start
+            r.end += chunk_start
         all_results.extend(final)
 
     merged = merge_overlapping_spans(all_results)
@@ -369,11 +466,17 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
             operators[ent_type] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
         elif effective_style == "HIDDEN":
             label = ent_type.replace("IN_", "").replace("_", " ").title()
-            operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{label} Hidden>"})
+            operators[ent_type] = OperatorConfig(
+                "replace", {"new_value": f"<{label} Hidden>"}
+            )
         else:  # PLACEHOLDER (default)
-            operators[ent_type] = OperatorConfig("replace", {"new_value": f"<{ent_type}>"})
+            operators[ent_type] = OperatorConfig(
+                "replace", {"new_value": f"<{ent_type}>"}
+            )
 
-    anonymized = anonymizer.anonymize(text=raw_text, analyzer_results=merged, operators=operators)
+    anonymized = anonymizer.anonymize(
+        text=raw_text, analyzer_results=merged, operators=operators
+    )
     result_text = anonymized.text
 
     # MASK: replace every <TAG> placeholder with █ blocks of the original entity length
@@ -381,16 +484,24 @@ def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> 
         # Sort by start descending so replacements don't shift indices
         for r in sorted(merged, key=lambda x: x.start, reverse=True):
             original_len = r.end - r.start
-            result_text = result_text.replace(f"<{r.entity_type}>", "█" * original_len, 1)
+            result_text = result_text.replace(
+                f"<{r.entity_type}>", "█" * original_len, 1
+            )
 
     return {
         "secured_text": result_text,
         "entities": [
-            {"text": raw_text[r.start:r.end], "type": r.entity_type, "score": r.score, "start": r.start, "end": r.end}
+            {
+                "text": raw_text[r.start : r.end],
+                "type": r.entity_type,
+                "score": r.score,
+                "start": r.start,
+                "end": r.end,
+            }
             for r in merged
         ],
         "metrics": {
             "characters_processed": len(raw_text),
-            "identities_masked":    len(merged)
-        }
+            "identities_masked": len(merged),
+        },
     }
