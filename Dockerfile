@@ -24,7 +24,6 @@ RUN python -m spacy download en_core_web_lg
 
 # 6. Copy application code
 COPY ./app /code/app
-COPY .env /code/.env
 
 # 7. Expose port
 EXPOSE 8000
