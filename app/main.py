@@ -186,7 +186,7 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         return file_bytes.decode("latin-1")
 
 
-# ── Visual redaction helpers ─────────────────────────────────────────────────
+# ── Visual redaction helpers ──────────────────────────────────────────────────
 
 
 def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
@@ -242,7 +242,7 @@ def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
         return file_bytes
 
 
-# ── API Routes ──────────────────────────────────────────────────────────────
+# ── API Routes ────────────────────────────────────────────────────────────────
 
 
 @app.post("/api/v1/redact")

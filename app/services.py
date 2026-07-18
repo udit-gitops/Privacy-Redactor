@@ -92,7 +92,7 @@ analyzer.registry.add_recognizer(
     )
 )
 
-# ── Employee ID ──────────────────────────────────────────────────────────────
+# ── Employee ID ───────────────────────────────────────────────────────────────
 analyzer.registry.add_recognizer(
     PatternRecognizer(
         supported_entity="EMPLOYEE_ID",
@@ -161,7 +161,7 @@ analyzer.registry.add_recognizer(
                 regex=(
                     r"\b(?:Flat|House|Plot|Door|H\.?No\.?|Block|Sector|Survey|S\.?No\.?|Room|Floor|Wing)[\s.#-]*"
                     r"[\w/,-]+(?:[,\s]+[\w\s/.-]+){2,8}"
-                    r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Ghaziabad|Ludhiana|Baroda|Nashik))"
+                    r"(?:[,\s]+(?:Delhi|Mumbai|Chennai|Bangalore|Bengaluru|Hyderabad|Kolkata|Pune|Ahmedabad|Jaipur|Kota|Jodhpur|Udaipur|Lucknow|Kanpur|Nagpur|Indore|Bhopal|Patna|Surat|Vadodara|Rajkot|Coimbatore|Visakhapatnam|Agra|Nashik|Noida|Gurgaon|Gurugram|Faridabad|Chandigarh|Dehradun|Guwahati|Ranchi|Bhubaneswar|Thiruvananthapuram|Mysuru|Mangaluru))"
                     r"(?:[,\s]+(?:Rajasthan|Maharashtra|Karnataka|Tamil Nadu|Uttar Pradesh|West Bengal|Gujarat|Telangana|Andhra Pradesh|Madhya Pradesh|Bihar|Odisha|Kerala|Punjab|Haryana|Uttarakhand|Jharkhand|Assam|Himachal Pradesh|Goa|Delhi|NCR))?"
                 ),
                 score=0.82,
@@ -223,12 +223,6 @@ for entity, (regex, score, context) in INDIAN_PII.items():
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-if not GROQ_API_KEY:
-    print("⚠️  WARNING: GROQ_API_KEY not set. AI contextual filtering disabled.")
-    print(
-        "   Set GROQ_API_KEY in your .env file to enable contextual entity disambiguation."
-    )
 
 # Cache: (word, local_context) → "REDACT" | "KEEP"
 groq_cache: dict = {}
@@ -323,7 +317,7 @@ def extract_pii_with_groq(text: str) -> list:
         return []
 
 
-# ── Utility helpers ──────────────────────────────────────────────────────────
+# ── Utility helpers ───────────────────────────────────────────────────────────
 
 
 def chunk_text(text: str, chunk_size: int = 2000) -> list:
@@ -380,7 +374,7 @@ def mask_with_blocks(value: str) -> str:
 NRP_ALIASES = {"NRP"}
 
 
-# ── Main pipeline ────────────────────────────────────────────────────────────
+# ── Main pipeline ─────────────────────────────────────────────────────────────
 
 
 def process_text_redaction(raw_text: str, redact_style: str = "PLACEHOLDER") -> dict:
