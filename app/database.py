@@ -8,29 +8,25 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Database is optional — if not set, telemetry logging is skipped
-engine = None
-SessionLocal = None
-
 if DATABASE_URL:
-    try:
-        engine = create_engine(DATABASE_URL)
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    except Exception as e:
-        print(f"⚠️  Database connection failed: {e}. Running in no-telemetry mode.")
-        engine = None
-        SessionLocal = None
+    # Railway provides postgres:// but SQLAlchemy needs postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    engine = create_engine(DATABASE_URL)
+    _db_available = True
 else:
-    print("ℹ️  DATABASE_URL not set. Running without telemetry logging.")
+    # Local dev fallback — SQLite so the app starts without PostgreSQL
+    print("WARNING: DATABASE_URL not set. Using local SQLite for development.")
+    engine = create_engine(
+        "sqlite:///./local_dev.db", connect_args={"check_same_thread": False}
+    )
+    _db_available = False
 
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
 def get_db():
-    """Database session generator — returns None if database is not configured."""
-    if SessionLocal is None:
-        yield None
-        return
     db = SessionLocal()
     try:
         yield db

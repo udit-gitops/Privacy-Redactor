@@ -2,86 +2,92 @@ import io
 import os
 import zipfile
 import xml.etree.ElementTree as ET
+import asyncio
 import fitz  # PyMuPDF — text extraction + OCR fallback
 import pdfplumber  # table extraction from PDFs
 import pytesseract
 from PIL import Image, ImageDraw
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import engine, get_db
 from app import models, services
 
-# Create DB tables on startup (only if database is configured)
-if engine:
-    try:
-        models.Base.metadata.create_all(bind=engine)
-    except Exception as e:
-        print(f"⚠️  Could not create database tables: {e}")
+try:
+    models.Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(
+        f"WARNING: DB table creation failed ({e.__class__.__name__}). App will run without DB logging."
+    )
 
+# ── Rate limiter — prevents API abuse ─────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Privacy & Compliance Redactor API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Allow requests from frontend domains (local dev + production)
-FRONTEND_URLS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://10.140.255.63:3000",
-    "https://spectacular-commitment-production-123b.up.railway.app",
-    "http://spectacular-commitment-production-123b.up.railway.app",
-]
-
+# ── CORS ──────────────────────────────────────────────────────────────────────
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_URLS,
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Restricted to needed methods only
+    allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Config ────────────────────────────────────────────────────────────────────
+# Max upload size: 10MB (prevents memory overload on Railway free tier)
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "10"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# Tesseract: auto-detect path (works on Linux/Docker and Windows)
+_tesseract_cmd = os.getenv("TESSERACT_CMD") or (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+    else None
+)
+if _tesseract_cmd:
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+
+
+# Tesseract language: Hindi + English for Indian documents (hin+eng)
+# Falls back to English only if Hindi pack not installed
+def _get_ocr_lang() -> str:
+    try:
+        langs = pytesseract.get_languages()
+        return "hin+eng" if "hin" in langs else "eng"
+    except Exception:
+        return "eng"
+
+
+OCR_LANG = _get_ocr_lang()
 
 
 class RedactRequest(BaseModel):
     text: str
 
 
-# Point Tesseract to the right binary (Windows needs an explicit path)
-_tesseract_cmd = os.getenv("TESSERACT_CMD")
-if _tesseract_cmd:
-    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
-elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
-    pytesseract.pytesseract.tesseract_cmd = (
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    )
-else:
-    print("⚠️  WARNING: Tesseract OCR not found. Image/scanned PDF redaction will fail.")
-    print("   Install Tesseract or set TESSERACT_CMD environment variable.")
-
-
-# ── Health Check Endpoint ────────────────────────────────────────────────────
-
-
+# ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
-async def health_check():
-    """Health check endpoint — verify backend is running and accessible."""
-    return {
-        "status": "ok",
-        "service": "Privacy & Compliance Redactor API",
-        "database": "configured" if engine else "not configured (telemetry disabled)",
-        "groq_ai": "enabled" if services.groq_client else "disabled",
-    }
+async def health():
+    """Railway and uptime monitors ping this to keep the container warm."""
+    return {"status": "ok", "ocr_lang": OCR_LANG}
 
 
-# ── DB helper ──────���────────────────────────────────────────────────────────
+# ── DB helper ─────────────────────────────────────────────────────────────────
 
 
 def save_log(db: Session, result: dict):
-    """Save a single redaction event to the database for telemetry.
-    Silently skipped if database is not configured.
-    """
-    if db is None:  # Database not configured
-        return
+    """Save redaction event to DB for telemetry."""
     try:
         log = models.RedactionLog(
             input_characters=result["metrics"]["characters_processed"],
@@ -91,20 +97,27 @@ def save_log(db: Session, result: dict):
         db.commit()
         db.refresh(log)
     except Exception as e:
-        print(f"⚠️  Failed to save telemetry log: {e}")
+        # DB logging failure should never crash the main redaction flow
+        print(f"DB log warning: {e}")
+        db.rollback()
 
 
-# ── Text extraction helpers ──────────────────────────────────────────────────
+# ── Text extraction helpers ───────────────────────────────────────────────────
 
 
 def extract_text_from_image(file_bytes: bytes) -> str:
+    """OCR an image using Tesseract. Supports Hindi + English for Indian documents."""
     try:
         image = Image.open(io.BytesIO(file_bytes))
-        return pytesseract.image_to_string(image)
+        # Upscale small images for better OCR accuracy
+        w, h = image.size
+        if w < 1000:
+            image = image.resize((w * 2, h * 2), Image.LANCZOS)
+        return pytesseract.image_to_string(image, lang=OCR_LANG)
     except pytesseract.TesseractNotFoundError:
         raise HTTPException(
             status_code=500,
-            detail="Tesseract OCR not found. Install Tesseract-OCR or set TESSERACT_CMD in your .env file.",
+            detail="Tesseract OCR engine not found on this server. Contact the administrator.",
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"OCR failed: {e}")
@@ -112,10 +125,10 @@ def extract_text_from_image(file_bytes: bytes) -> str:
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """
-    Extracts text from PDFs using a three-layer approach:
-      1. PyMuPDF (fitz) for layout-aware text blocks
-      2. pdfplumber for table extraction (formatted as markdown-style rows)
-      3. Tesseract OCR fallback for scanned/image-only pages
+    Three-layer PDF extraction:
+    1. PyMuPDF (fitz) — layout-aware text blocks
+    2. OCR fallback — for scanned/image-only pages
+    3. pdfplumber — table extraction
     """
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -124,19 +137,16 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
         for i, page in enumerate(doc):
             plumber_page = pdf.pages[i]
-
-            # Layer 1: layout-aware text blocks, sorted top-to-bottom, left-to-right
             blocks = sorted(page.get_text("blocks"), key=lambda b: (b[1], b[0]))
             page_text = "\n\n".join(b[4].strip() for b in blocks if b[4].strip())
 
-            # Layer 2: OCR fallback for scanned pages (less than 50 chars = likely image)
+            # Scanned page — run OCR at higher DPI for better accuracy
             if len(page_text.strip()) < 50:
-                pix = page.get_pixmap(dpi=150)
+                pix = page.get_pixmap(dpi=200)
                 page_text += "\n--- OCR ---\n" + extract_text_from_image(
                     pix.tobytes("png")
                 )
 
-            # Layer 3: Tables from pdfplumber, formatted as markdown rows
             tables = plumber_page.extract_tables()
             if tables:
                 table_text = []
@@ -161,11 +171,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
-    """
-    Extracts plain text from a .docx file by reading its internal XML.
-    Note: python-docx library would do this in 3 lines if you add it to requirements.txt —
-    but this approach has zero extra dependencies and is explainable in an interview.
-    """
+    """Extracts plain text from .docx by reading its internal XML (no extra dependencies)."""
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as docx:
             root = ET.parse(docx.open("word/document.xml")).getroot()
@@ -186,11 +192,11 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         return file_bytes.decode("latin-1")
 
 
-# ── Visual redaction helpers ──────────────────────────────────────────────────
+# ── Visual redaction ──────────────────────────────────────────────────────────
 
 
 def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
-    """Blacks out detected entity text in the actual PDF using PyMuPDF redaction annotations."""
+    """Black-box redaction directly on PDF using PyMuPDF annotations."""
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
@@ -210,20 +216,19 @@ def redact_pdf_visual(file_bytes: bytes, entities: list) -> bytes:
 
 
 def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
-    """Draws black rectangles over detected entity words in an image using Tesseract bounding boxes."""
+    """Draw black rectangles over detected entities using Tesseract bounding boxes."""
     try:
         image = Image.open(io.BytesIO(file_bytes))
         draw = ImageDraw.Draw(image)
-        ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-
-        # Collect individual words from all entity texts
+        ocr_data = pytesseract.image_to_data(
+            image, lang=OCR_LANG, output_type=pytesseract.Output.DICT
+        )
         terms = {
             word.lower()
             for ent in entities
             for word in ent.get("text", "").split()
             if len(word) > 1
         }
-
         for i, word in enumerate(ocr_data["text"]):
             if word.strip().lower() in terms:
                 x, y, w, h = (
@@ -233,7 +238,6 @@ def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
                     ocr_data["height"][i],
                 )
                 draw.rectangle([x, y, x + w, y + h], fill="black")
-
         out = io.BytesIO()
         image.save(out, format="PNG")
         return out.getvalue()
@@ -246,37 +250,50 @@ def redact_image_visual(file_bytes: bytes, entities: list) -> bytes:
 
 
 @app.post("/api/v1/redact")
+@limiter.limit("30/minute")  # 30 text redactions per minute per IP
 async def redact_text(
+    request: Request,
     payload: RedactRequest,
-    redact_style: str = Query(
-        "PLACEHOLDER"
-    ),  # ← FIX: Use Query() to capture from query params
+    redact_style: str = "PLACEHOLDER",
     db: Session = Depends(get_db),
 ):
+    if len(payload.text) > 100_000:
+        raise HTTPException(
+            status_code=400, detail="Text too large. Maximum 100,000 characters."
+        )
     try:
-        result = services.process_text_redaction(payload.text, redact_style)
+        # Run CPU-heavy redaction in a thread so FastAPI stays responsive
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, services.process_text_redaction, payload.text, redact_style
+        )
         save_log(db, result)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/redact-file")
+@limiter.limit("10/minute")  # File processing is heavier — lower limit
 async def redact_file(
+    request: Request,
     file: UploadFile = File(...),
-    redact_style: str = Form(
-        "PLACEHOLDER"
-    ),  # Form field — comes from multipart/form-data
-    return_redacted_document: str = Form(
-        "false"
-    ),  # Form field — booleans come as strings in forms
+    redact_style: str = Form("PLACEHOLDER"),
+    return_redacted_document: str = Form("false"),
     db: Session = Depends(get_db),
 ):
-    try:
-        file_bytes = await file.read()
-        name = file.filename.lower()
+    # Validate file size before reading into memory
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.",
+        )
 
-        # Route to the right extractor based on file extension
+    name = file.filename.lower()
+
+    try:
         if name.endswith(".pdf"):
             text = extract_text_from_pdf(file_bytes)
         elif name.endswith(".docx"):
@@ -296,10 +313,12 @@ async def redact_file(
                 status_code=400, detail="No readable text found in the uploaded file."
             )
 
-        result = services.process_text_redaction(text, redact_style)
-        save_log(db, result)  # reused helper — no duplicate code
+        # Run CPU-heavy redaction in a thread so FastAPI event loop stays free
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, services.process_text_redaction, text, redact_style
+        )
+        save_log(db, result)
 
-        # Form fields come as strings — "true"/"false", so compare explicitly
         if return_redacted_document.lower() == "true":
             if name.endswith(".pdf"):
                 out_bytes = redact_pdf_visual(file_bytes, result["entities"])
